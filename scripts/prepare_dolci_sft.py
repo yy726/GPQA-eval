@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
@@ -27,7 +28,30 @@ from collections import Counter
 from pathlib import Path
 
 DEFAULT_DATASET = "allenai/Dolci-Think-SFT-7B"
-SOURCE_KEYS = ("source", "dataset_source", "dataset", "origin")
+SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset", "domain")
+
+# Plain ChatML (the format Qwen3 uses). Some *-Base tokenizers ship without a chat template;
+# we fall back to this so token counts match what training / evaluation will see.
+CHATML_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+)
+
+
+def ensure_chat_template(tok):
+    if not getattr(tok, "chat_template", None):
+        tok.chat_template = CHATML_TEMPLATE
+        print("[i] tokenizer has no chat_template; using plain ChatML", file=sys.stderr)
+    return tok
+
+
+def count_chat_tokens(tok, msgs: list[dict]) -> int:
+    ids = tok.apply_chat_template(msgs, tokenize=True)
+    if hasattr(ids, "keys"):  # transformers v5 may return a BatchEncoding
+        ids = ids["input_ids"]
+    return len(ids)
 MSG_KEYS = ("messages", "conversations")
 
 
@@ -110,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(args.tokenizer)
+    tok = ensure_chat_template(AutoTokenizer.from_pretrained(args.tokenizer))
     ds = ds.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer)
     rng = random.Random(args.seed)
 
@@ -119,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     for i, ex in enumerate(ds):
         if i >= args.max_scan or len(kept) >= args.n:
             break
+        if i == 0:
+            print("columns:", sorted(ex.keys()), file=sys.stderr)
         stats["scanned"] += 1
         source = get_source(ex)
         if not keep_source(source, args.include, args.exclude):
@@ -137,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         if pc is None:
             stats["drop_format"] += 1
             continue
-        n_tok = len(tok.apply_chat_template(msgs, tokenize=True))
+        n_tok = count_chat_tokens(tok, msgs)
         if n_tok > args.max_tokens:
             stats["drop_length"] += 1
             continue
@@ -155,10 +181,18 @@ def main(argv: list[str] | None = None) -> int:
     by_source = Counter(ex["source"] for ex in kept)
     print(json.dumps({"kept": len(kept), "total_tokens": total_tokens, **stats}, indent=2))
     print("top sources:", by_source.most_common(15))
+    if by_source and set(by_source) == {"unknown"}:
+        print(f"[i] no source column recognised (tried {SOURCE_KEYS}); --include/--exclude have no effect",
+              file=sys.stderr)
     if len(kept) < args.n:
         print(f"[!] only {len(kept)} rows passed the filters (asked for {args.n})", file=sys.stderr)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    # Streaming datasets can leave background threads alive that keep the interpreter from
+    # exiting (seen on Colab: the script printed its summary and then hung). Exit hard.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

@@ -1,8 +1,6 @@
-# Training environment (Colab T4), matching Unsloth's official Colab pins.
-# Use a separate runtime from evaluation unless you install exactly the stack in notebook 10/11.
+# Training environment (Colab T4). Let uv/pip resolve unsloth + its matching trl/transformers.
+# Tested 2026-11 on a Colab T4: unsloth 2026.11.3, vllm 0.33.0, trl 1.15.0, transformers 5.17.0, torch 2.14.0.
 unsloth
-transformers==4.57.6
-trl==0.22.2
-peft
+vllm
 bitsandbytes
 datasets

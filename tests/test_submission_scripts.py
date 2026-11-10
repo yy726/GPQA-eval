@@ -62,3 +62,22 @@ def test_analyze_samples(tmp_path: Path):
     assert stats["length"]["n_docs"] == 2
     assert stats["length"]["has_think_rate"] == 50.0
     assert "SECRET" not in json.dumps(rep)  # never leak question text
+
+
+def test_chatml_fallback_template():
+    jinja2 = __import__("pytest").importorskip("jinja2")
+    out = jinja2.Template(prepare_dolci_sft.CHATML_TEMPLATE).render(
+        messages=[{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}],
+        add_generation_prompt=False,
+    )
+    assert out == "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello<|im_end|>\n"
+
+    class Tok:
+        chat_template = None
+
+        def apply_chat_template(self, msgs, tokenize=True):
+            return {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+
+    tok = prepare_dolci_sft.ensure_chat_template(Tok())
+    assert tok.chat_template == prepare_dolci_sft.CHATML_TEMPLATE
+    assert prepare_dolci_sft.count_chat_tokens(tok, [{"role": "user", "content": "x"}]) == 3
