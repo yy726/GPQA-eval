@@ -1,7 +1,7 @@
 # GPQA-eval：一张 T4 上的后训练 Hackathon
 
 > **🔀 这是 `submission-yy726` 分支**：yy726 的参考提交（Qwen3-0.6B + Dolci SFT）。比赛规则以 `main` 分支为准。
-> 训练代码和实验记录见 [experiments/README.md](experiments/README.md)，一键实验：[`notebooks/10_iterate_0p6b.ipynb`](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/10_iterate_0p6b.ipynb)。
+> 训练代码和实验记录见 [experiments/README.md](experiments/README.md)。推荐先跑 [`notebooks/11_sft_grpo_unsloth.ipynb`](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/11_sft_grpo_unsloth.ipynb)（SFT + GRPO，快速模式约 15–25 分钟）。
 
 **用免费的 Colab T4，对开源模型做后训练，在 GPQA 上冲分。**
 Post-train an open model on a single free Colab T4 GPU and hill-climb GPQA. Public data, public weights, locked eval, reproducible by anyone.

@@ -5,13 +5,27 @@
 
 | 文件 | 作用 |
 |---|---|
-| `notebooks/10_iterate_0p6b.ipynb` | **一键实验**：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → 锁定评测 → 诊断 JSON |
+| `notebooks/11_sft_grpo_unsloth.ipynb` | **推荐先跑**：照 Unsloth 官方 Qwen3 Instruct / GRPO notebook 的写法，SFT 预热（Dolci + 选择题格式）→ GRPO（SciQ 选择题，可验证奖励），在同一个 vLLM 引擎里对 base / SFT / GRPO 各做一次 GPQA 快速评测。`MODE="quick"` 约 15–25 分钟（待实测） |
+| `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
 | `notebooks/03_grpo_mcq_lora.ipynb` | 进阶：选择题 GRPO |
 | `scripts/prepare_dolci_sft.py` | Dolci 流式读取、按来源和长度过滤、可选去掉 `<think>` |
 | `scripts/analyze_samples.py` | 从本地逐题日志算聚合诊断（准确率、可提取率、截断率、长度、字母分布），不输出题目 |
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/10_iterate_0p6b.ipynb)
+notebook 11（SFT + GRPO，快速）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/11_sft_grpo_unsloth.ipynb)
+notebook 10（SFT + 锁定评测）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/10_iterate_0p6b.ipynb)
+
+## 用多大的模型？
+
+Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%）：
+
+| 模型 | non-thinking | thinking | 结论 |
+|---|---|---|---|
+| Qwen3-0.6B | 22.9 | 27.9 | 官方完整后训练都在随机水平附近 → **只适合验证流程**，能观察到的主要是格式指标（可提取率、截断率） |
+| Qwen3-1.7B | 28.6 | 40.1 | **能看到 GPQA 变化的最小尺寸**；提升主要靠长推理，4096 token 预算会限制它 |
+| Qwen3-4B | 41.7 | 55.9 | 变化最清楚；Unsloth 官方 T4 GRPO 示例用的就是 4B（16-bit LoRA） |
+
+建议：0.6B + `MODE="quick"` 先确认流程 → 1.7B 跑 `full` 看 SFT / GRPO 的变化 → 4B 做最终提交。
 
 ## 第一轮实验矩阵
 
@@ -23,6 +37,8 @@
 | `E3_think_strip` | 与 E1 相同的数据，但去掉 `<think>` | 同一批题目，只改答案风格 |
 
 建议顺序：先 `SMOKE=True` 跑一次 E1 确认流程，再 E0 → E1 → E2 → E3（都用 `SEEDS="0"`）。
+
+**数据都是抽样的子集**：`prepare_dolci_sft.py` 流式读取 Dolci（不会下载全部 ~200 万条），用 shuffle buffer 随机打乱后只保留前 N 条满足来源和长度过滤的样本。notebook 10 默认 N=5000（`SMOKE=True` 时 200 条、训练 30 步、评测只跑 20 题）；notebook 11 的 `quick` 模式是 200 + 200 条、SFT 40 步、GRPO 30 步、GPQA 60 题。
 
 ## 怎么读诊断
 

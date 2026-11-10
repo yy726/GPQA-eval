@@ -90,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude", nargs="*", default=[], help="Drop sources containing any of these substrings")
     p.add_argument("--strip-think", action="store_true",
                    help="Remove <think>...</think> from the assistant answer (short-answer style)")
-    p.add_argument("--shuffle-buffer", type=int, default=50_000)
+    p.add_argument("--shuffle-buffer", type=int, default=10_000,
+                   help="Rows buffered for streaming shuffle; smaller = faster start (use ~1000 for smoke tests)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-scan", type=int, default=2_000_000, help="Stop after scanning this many rows")
     p.add_argument("--list-sources", type=int, default=0, metavar="K",
