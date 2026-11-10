@@ -46,6 +46,11 @@ if [[ -n "${LIMIT:-}" ]]; then
   LIMIT_ARGS=(--limit "$LIMIT")
 fi
 
+# T4 (sm75) cannot use FlashInfer's top-p/top-k sampler; vLLM raises if it is forced on (e.g. by an
+# environment variable left over from Unsloth in the same session). This only selects the sampler
+# implementation; it does not change the sampling distribution or the scores.
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+
 GEN_KWARGS="max_gen_toks=${MAX_GEN_TOKS},temperature=${TEMPERATURE},top_p=${TOP_P},do_sample=True"
 
 mkdir -p "$OUT_DIR"

@@ -1,10 +1,8 @@
 # Locked evaluation environment for Colab T4 (sm75).
-# vllm==0.11.2 is the version Unsloth's official Colab notebooks pin specifically for Tesla T4;
-# lm-eval 0.4.11 is the newest release whose vLLM backend accepts that version
-# (lm-eval >= 0.4.12 requires vllm >= 0.18). transformers matches Unsloth's pin.
-# Changing any of these can change scores (e.g. the GPQA task preprocessing differs across
-# lm-eval releases), so every leaderboard number must come from exactly this stack.
-vllm==0.11.2
-lm-eval==0.4.11
-transformers==4.57.6
+# lm-eval is pinned (the GPQA task preprocessing differs across releases, so scores from
+# different lm-eval versions must not be mixed). vLLM follows lm-eval's own requirement
+# (vllm>=0.18); vLLM 0.33 has been seen loading Qwen3 on a Colab T4 (Python 3.13, torch 2.14).
+# vllm==0.11.2 (Unsloth's old T4 pin) no longer installs on current Colab, so it is not used.
+# On T4, FlashInfer's sampler is unsupported: scripts/eval_gpqa.sh sets VLLM_USE_FLASHINFER_SAMPLER=0.
+lm-eval[vllm]==0.4.13
 datasets
