@@ -94,7 +94,7 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 - 任务：`gpqa_diamond_cot_zeroshot`、`gpqa_main_cot_zeroshot`
 - 后端：vLLM（跑不通时回退 HF transformers）
-- **版本锁定**（见 [`requirements-eval.txt`](requirements-eval.txt)）：`vllm==0.11.2`（Unsloth 官方 Colab 专门给 T4 用的版本）、`lm-eval==0.4.11`（能配合这个 vLLM 的最新版；不同 lm-eval 版本的 GPQA 预处理不同，分数不能混用）、`transformers==4.57.6`
+- **版本锁定**（见 [`requirements-eval.txt`](requirements-eval.txt)）：`lm-eval==0.4.13`（不同 lm-eval 版本的 GPQA 预处理不同，分数不能混用）+ 对应的 vLLM（≥ 0.18；实测 vLLM 0.33 能在 Colab T4 上加载 Qwen3）。T4 不支持 FlashInfer 采样器，`eval_gpqa.sh` 会设置 `VLLM_USE_FLASHINFER_SAMPLER=0`（只影响实现，不影响分数）
 - `dtype=float16`（T4 没有 bf16），`max_model_len=8192`，`max_gen_toks=4096`
 - `temperature=0.6`，`top_p=0.95`，使用模型自带 chat template（`--apply_chat_template`）
 - 4 个 vLLM 采样 seed（0–3）；lm-eval 的 `--seed` 固定为 0，保证所有人的选项顺序一致
