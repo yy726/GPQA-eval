@@ -10,7 +10,7 @@
     "backend": "vllm",
     "metric": "exact_match,flexible-extract",
     "config": "scripts/eval_gpqa.sh (locked)",
-    "versions": {"lm_eval": "0.4.13", "vllm": "x.y.z", "transformers": "x.y.z"}
+    "versions": {"lm-eval": "0.4.11", "vllm": "0.11.2", "transformers": "4.57.6"}
   },
   "scores": {
     "gpqa_diamond": {"mean": 35.1, "stderr": 1.2, "per_seed": {"0": 34.3, "1": 36.9, "2": 33.3, "3": 35.9}},

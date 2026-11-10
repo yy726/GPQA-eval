@@ -1,6 +1,10 @@
-# Evaluation environment (Colab T4). Lower bounds checked against PyPI on 2026-11-10.
-# After the TA smoke test on a real T4, replace these with exact `==` pins and record them here.
-lm-eval[vllm]>=0.4.13
-vllm>=0.17.0
-transformers>=5.0
+# Locked evaluation environment for Colab T4 (sm75).
+# vllm==0.11.2 is the version Unsloth's official Colab notebooks pin specifically for Tesla T4;
+# lm-eval 0.4.11 is the newest release whose vLLM backend accepts that version
+# (lm-eval >= 0.4.12 requires vllm >= 0.18). transformers matches Unsloth's pin.
+# Changing any of these can change scores (e.g. the GPQA task preprocessing differs across
+# lm-eval releases), so every leaderboard number must come from exactly this stack.
+vllm==0.11.2
+lm-eval==0.4.11
+transformers==4.57.6
 datasets
