@@ -1,0 +1,16 @@
+{
+  "team": "reference",
+  "reference": true,
+  "hf_model_id": "Qwen/Qwen3-0.6B-Base",
+  "base_model": "Qwen/Qwen3-0.6B-Base",
+  "method": "Reference: 0.6B starting point (debug / fast-iteration track), no post-training",
+  "datasets": [],
+  "train_gpu_hours_t4": null,
+  "eval": {"harness": "lm-evaluation-harness", "backend": "vllm", "metric": "exact_match,flexible-extract", "config": "scripts/eval_gpqa.sh (locked)"},
+  "scores": {"gpqa_diamond": {"mean": null}, "gpqa_main": {"mean": null}},
+  "decontam": {"max_13gram_overlap_rate": null, "report": "n/a"},
+  "training_notebook": "n/a",
+  "submitted_at": "2026-11-10",
+  "verified": false,
+  "notes": "Scores pending: TA fills these in after a real Colab T4 run."
+}

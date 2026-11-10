@@ -1,7 +1,0 @@
-# Training environment (Colab T4). Use a separate runtime from evaluation:
-# vLLM and Unsloth pin different torch builds.
-unsloth>=2026.11.3
-transformers>=5.0
-trl>=1.17
-peft>=0.21
-datasets

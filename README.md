@@ -12,7 +12,7 @@ Post-train an open model on a single free Colab T4 GPU and hill-climb GPQA. Publ
 
 | | |
 |---|---|
-| **起点模型** | [`Qwen/Qwen3-4B-Base`](https://huggingface.co/Qwen/Qwen3-4B-Base)（主赛道）或 [`Qwen/Qwen3-1.7B-Base`](https://huggingface.co/Qwen/Qwen3-1.7B-Base)（迭代快） |
+| **起点模型** | [`Qwen/Qwen3-4B-Base`](https://huggingface.co/Qwen/Qwen3-4B-Base)（主赛道）、[`Qwen/Qwen3-1.7B-Base`](https://huggingface.co/Qwen/Qwen3-1.7B-Base) 或 [`Qwen/Qwen3-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-0.6B-Base)（迭代快 / 调试） |
 | **训练数据** | 公开数据集，推荐 AI2 OLMo 3 的 **Dolci** 系列（SFT / DPO / RL） |
 | **算力** | 只用 Colab T4（16GB），训练总时长 ≤ 4 小时 |
 | **主指标** | **GPQA Diamond**（198 题，4 选 1），lm-evaluation-harness，4 个 seed 取平均 |
@@ -32,15 +32,21 @@ Post-train an open model on a single free Colab T4 GPU and hill-climb GPQA. Publ
 |---|---|---|
 | `00_smoke_test_t4.ipynb` | **助教赛前跑**：确认 vLLM / lm-eval / LoRA 在 T4 上能用，记录耗时和显存 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/main/notebooks/00_smoke_test_t4.ipynb) |
 | `01_eval_gpqa.ipynb` | 锁定版评测，生成提交 JSON | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/main/notebooks/01_eval_gpqa.ipynb) |
-| `02_sft_dolci_lora.ipynb` | 基线：Dolci 数据过滤 → 去污染 → LoRA SFT → 推到 Hub | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/main/notebooks/02_sft_dolci_lora.ipynb) |
-| `03_grpo_mcq_lora.ipynb` | 进阶：选择题 GRPO（可验证奖励 RL） | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/main/notebooks/03_grpo_mcq_lora.ipynb) |
 
 赛前准备（每位同学）：
 1. 注册 Hugging Face 账号，在 [Idavidrein/gpqa](https://huggingface.co/datasets/Idavidrein/gpqa) 页面**接受数据集条款**（需要人工点同意，提前做）。
 2. 创建一个 **write** 权限的 HF token，放到 Colab 左侧 🔑 Secrets，名字叫 `HF_TOKEN`。
 3. 确认 Colab 能分到 T4（Runtime → Change runtime type → T4 GPU）。
 
-推荐流程：`02`（SFT）→ `01`（评测）→ 调数据和超参 → 可选 `03`（GRPO）→ `01` → 提交。
+**训练代码由各队自己实现。** 这个仓库只提供比赛框架（规则、锁定评测、去污染、排行榜），不提供训练解法。常用工具：
+- 数据：AI2 OLMo 3 的 Dolci 系列，例如 [Dolci-Think-SFT-7B](https://huggingface.co/datasets/allenai/Dolci-Think-SFT-7B)、[Dolci-Instruct-SFT-7B](https://huggingface.co/datasets/allenai/Dolci-Instruct-SFT-7B)，以及对应的 DPO / RL 数据
+- 训练：[Unsloth](https://unsloth.ai/docs/get-started/unsloth-notebooks)（T4 上省显存，有 Qwen3 的官方 Colab notebook）、[TRL](https://github.com/huggingface/trl)（SFTTrainer / DPOTrainer / GRPOTrainer）
+- 教材：[RLHF Book](https://rlhfbook.com) 第 4（SFT）、6（策略梯度 / GRPO）、8（DPO）章
+- **训练集必须先过 `scripts/decontam.py`**（见 RULES）
+
+参考实现：分支 [`submission-yy726`](https://github.com/yy726/GPQA-eval/tree/submission-yy726)（Qwen3-0.6B + Dolci SFT 的一个示例提交）。
+
+推荐流程：自己的训练 notebook → `01`（评测）→ 调数据和超参 → `01` → 提交。
 
 命令行用户也可以直接用脚本：
 
@@ -59,8 +65,8 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 | 候选 | T4（sm75，fp16）+ vLLM | 结论 |
 |---|---|---|
-| **Qwen3-4B / 1.7B-Base** | 标准稠密 Transformer（GQA，head_dim 128，纯文本），走 vLLM 最成熟的路径；Unsloth 官方的 Qwen3 (4B) GRPO notebook 就在 T4 上用 vLLM | ✅ 选用 |
-| Qwen3.5-4B-Base | Gated DeltaNet 混合架构 + 视觉编码器；sm75 上有未解决的性能问题（[vllm#36589](https://github.com/vllm-project/vllm/issues/36589)） | ⚠️ 风险中等 |
+| **Qwen3-4B / 1.7B / 0.6B-Base** | 标准稠密 Transformer（GQA，head_dim 128，纯文本），走 vLLM 最成熟的路径；Unsloth 官方的 Qwen3 (4B) GRPO notebook 就在 T4 上用 vLLM | ✅ 选用 |
+| Qwen3.5-4B-Base | Gated DeltaNet 混合架构 + 视觉编码器；sm75 上有未解决的问题（[vllm#36589](https://github.com/vllm-project/vllm/issues/36589)）；**Colab T4 实测 vLLM 报 `Engine core initialization failed`** | ❌ 不可用 |
 | Gemma 4 E2B（Google / Unsloth 版架构相同） | 全局注意力 head_dim=512，Triton kernel 需要 96KB 共享内存，T4 只有 64KB，启动即报错（[vllm#38918](https://github.com/vllm-project/vllm/issues/38918)，修复 [PR #39018](https://github.com/vllm-project/vllm/pull/39018) 未合并） | ❌ 需要打补丁 |
 | OLMo 3 Base | 只有 7B / 32B；7B 的 fp16 权重约 14–15GB，T4 放不下 | ❌ 尺寸不合适 |
 
@@ -110,7 +116,7 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 - **fp16**：T4 没有 bf16，模型以 fp16 运行。Qwen3 在 fp16 下一般稳定，`00` 的 Test 1 会检查输出是否正常（没有乱码或 NaN）。
 - **Thinking 模式**：官方 `Qwen3-4B` 的 chat template 默认开 thinking，在 4096 token 预算下长思考会被截断；这是锁定配置的一部分，对所有人一样。
-- **Unsloth / vLLM 版本冲突**：Colab 上偶尔会互相覆盖依赖（例如 numpy）。评测和训练用不同的 runtime；`02`/`03` 里留了 `USE_UNSLOTH=False` 的纯 transformers + PEFT 回退路径。
+- **Unsloth / vLLM 版本冲突**：Colab 上偶尔会互相覆盖依赖（例如 numpy）。建议评测和训练用不同的 runtime。
 - **Colab 断线**：训练 checkpoint 会自动推到你的私有 `<repo>-ckpt` 仓库，可以续训。
 
 ---
@@ -118,11 +124,10 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 ## 仓库结构 / Layout
 
 ```
-notebooks/      00 冒烟测试 · 01 评测 · 02 SFT 基线 · 03 GRPO 进阶
+notebooks/      00 冒烟测试 · 01 评测
 scripts/
   eval_gpqa.sh          锁定评测（与 01 相同）
   aggregate_results.py  多 seed 结果 → 提交 JSON（只读汇总指标，不含题目）
-  prepare_dolci_sft.py  Dolci 流式读取、按来源和长度过滤、抽样，输出 TRL prompt-completion 格式
   decontam.py           训练集 vs GPQA 的 13-gram 重叠检查（不输出题目）
   build_leaderboard.py  校验 submissions/*.json，生成 LEADERBOARD.md
 submissions/    schema.json · _example.json · ref-*.json（参考行）· <team>.json

@@ -10,8 +10,9 @@
 
 ## 2. 模型 / Model
 
-- 必须从 `Qwen/Qwen3-4B-Base`（主赛道）或 `Qwen/Qwen3-1.7B-Base` 出发。
-- 4B 全参训练在 T4 上放不下，实际上只能用 LoRA 等参数高效方法；1.7B 可以尝试全参，但要自己控制显存。
+- 必须从 `Qwen/Qwen3-4B-Base`（主赛道）、`Qwen/Qwen3-1.7B-Base` 或 `Qwen/Qwen3-0.6B-Base`（迭代快 / 调试）出发。三个尺寸在同一张榜上排名，`base_model` 一栏会标明。
+- 可以用这些模型的量化副本训练（例如 `unsloth/Qwen3-0.6B-Base-unsloth-bnb-4bit` 做 QLoRA），但提交的必须是合并后的 fp16 权重，`base_model` 填原始的 `Qwen/...` 名字。
+- 4B 全参训练在 T4 上放不下，实际上只能用 LoRA 等参数高效方法；0.6B / 1.7B 可以尝试全参，但要自己控制显存。
 - 提交的模型必须是**公开的 HF 仓库**，LoRA 已合并，fp16 权重，能被 vLLM / transformers 直接加载。
 - 不允许：模型融合（merge）其他已经后训练过的模型、加载其他模型的权重或 adapter。
 

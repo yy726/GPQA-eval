@@ -9,6 +9,7 @@
 | # | Team | Model | Base | GPQA Diamond | GPQA Main | Method | Verified |
 |---|------|-------|------|--------------|-----------|--------|----------|
 | | *(no submissions yet / 暂无提交)* | | | | | | |
+| ref | reference | [Qwen/Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base) | Qwen/Qwen3-0.6B-Base | 待测 / TBD | 待测 / TBD | Reference: 0.6B starting point (debug / fast-iteration track), no post-training |  |
 | ref | reference | [Qwen/Qwen3-1.7B-Base](https://huggingface.co/Qwen/Qwen3-1.7B-Base) | Qwen/Qwen3-1.7B-Base | 待测 / TBD | 待测 / TBD | Reference: 1.7B starting point, no post-training |  |
 | ref | reference | [Qwen/Qwen3-4B-Base](https://huggingface.co/Qwen/Qwen3-4B-Base) | Qwen/Qwen3-4B-Base | 待测 / TBD | 待测 / TBD | Reference: starting point, no post-training |  |
 | ref | reference | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Qwen/Qwen3-4B | 待测 / TBD | 待测 / TBD | Reference: official Qwen post-training (ceiling), default chat template |  |

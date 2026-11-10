@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import aggregate_results  # noqa: E402
 import build_leaderboard  # noqa: E402
 import decontam  # noqa: E402
-import prepare_dolci_sft  # noqa: E402
 
 FAKE_Q = (
     "A synthetic placeholder question about the spin state of a hypothetical particle "
@@ -95,14 +94,3 @@ def test_render_orders_by_diamond():
     b = dict(base, team="b", scores={"gpqa_diamond": {"mean": 40.0, "stderr": 1.0}})
     md = build_leaderboard.render([a, b])
     assert md.index("| 1 | b |") < md.index("| 2 | a |")
-
-
-def test_prompt_completion_conversion():
-    msgs = prepare_dolci_sft.get_messages(
-        {"conversations": [{"from": "human", "value": "hi"}, {"from": "gpt", "value": "<think>x</think>hello"}]}
-    )
-    pc = prepare_dolci_sft.to_prompt_completion(msgs)
-    assert pc["prompt"] == [{"role": "user", "content": "hi"}]
-    assert pc["completion"][0]["role"] == "assistant"
-    assert prepare_dolci_sft.keep_source("ai2-adapt/science_qa", ["science"], ["safety"])
-    assert not prepare_dolci_sft.keep_source("wildguard_safety", [], ["safety"])
