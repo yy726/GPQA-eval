@@ -1,9 +1,9 @@
 {
   "team": "reference",
   "reference": true,
-  "hf_model_id": "Qwen/Qwen3.5-2B-Base",
-  "base_model": "Qwen/Qwen3.5-2B-Base",
-  "method": "Reference: 2B starting point, no post-training",
+  "hf_model_id": "Qwen/Qwen3-1.7B-Base",
+  "base_model": "Qwen/Qwen3-1.7B-Base",
+  "method": "Reference: 1.7B starting point, no post-training",
   "datasets": [],
   "train_gpu_hours_t4": null,
   "eval": {"harness": "lm-evaluation-harness", "backend": "vllm", "metric": "exact_match,flexible-extract", "config": "scripts/eval_gpqa.sh (locked)"},
@@ -12,5 +12,5 @@
   "training_notebook": "n/a",
   "submitted_at": "2026-11-10",
   "verified": false,
-  "notes": "Scores pending: TA fills these in after running notebooks/00_smoke_test_t4.ipynb + 01_eval_gpqa.ipynb on a real Colab T4."
+  "notes": "Scores pending: TA fills these in after a real Colab T4 run."
 }

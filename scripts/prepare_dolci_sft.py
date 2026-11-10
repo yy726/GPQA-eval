@@ -12,7 +12,7 @@ column among `source`/`dataset_source`/`dataset`), because they can change betwe
 
 Usage:
     python scripts/prepare_dolci_sft.py --out data/sft.jsonl --n 5000 \
-        --tokenizer Qwen/Qwen3.5-4B-Base --max-tokens 4096 \
+        --tokenizer Qwen/Qwen3-4B-Base --max-tokens 4096 \
         --include math science stem --exclude safety
 """
 
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--n", type=int, default=5000, help="Number of examples to keep")
     p.add_argument("--max-tokens", type=int, default=4096, help="Drop examples longer than this")
-    p.add_argument("--tokenizer", default="Qwen/Qwen3.5-4B-Base")
+    p.add_argument("--tokenizer", default="Qwen/Qwen3-4B-Base")
     p.add_argument("--include", nargs="*", default=[], help="Keep only sources containing any of these substrings")
     p.add_argument("--exclude", nargs="*", default=[], help="Drop sources containing any of these substrings")
     p.add_argument("--shuffle-buffer", type=int, default=50_000)

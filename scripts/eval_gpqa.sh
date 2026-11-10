@@ -6,10 +6,10 @@
 #   bash scripts/eval_gpqa.sh <hf_model_id_or_local_path> [out_dir] [seeds] [backend]
 #
 # Examples:
-#   bash scripts/eval_gpqa.sh Qwen/Qwen3.5-4B-Base
-#   bash scripts/eval_gpqa.sh my-team/qwen35-4b-sft results/my-team "0 1 2 3" vllm
-#   bash scripts/eval_gpqa.sh my-team/qwen35-4b-sft results/quick "0" hf   # HF fallback, slow
-#   LIMIT=20 bash scripts/eval_gpqa.sh Qwen/Qwen3.5-4B-Base results/smoke "0"  # timing only; NOT valid for the leaderboard
+#   bash scripts/eval_gpqa.sh Qwen/Qwen3-4B-Base
+#   bash scripts/eval_gpqa.sh my-team/qwen3-4b-sft results/my-team "0 1 2 3" vllm
+#   bash scripts/eval_gpqa.sh my-team/qwen3-4b-sft results/quick "0" hf   # HF fallback, slow
+#   LIMIT=20 bash scripts/eval_gpqa.sh Qwen/Qwen3-4B-Base results/smoke "0"  # timing only; NOT valid for the leaderboard
 #
 # Notes:
 # * GPQA is gated: accept the terms at https://huggingface.co/datasets/Idavidrein/gpqa
@@ -17,6 +17,9 @@
 # * The GPQA terms ask that examples not be revealed online. `--log_samples` writes model
 #   outputs that contain the questions; keep `results/` OUT of any public repo (it is in
 #   .gitignore). Only the aggregated submission JSON is meant to be shared.
+# * Chat template: the model's own default template is used (`--apply_chat_template`). For the
+#   official Qwen/Qwen3-4B reference this means thinking mode is ON by default; with the locked
+#   4096-token budget some long thoughts get cut off. That is intended: everyone gets the same budget.
 # * Only the vLLM sampling seed changes between runs. lm-eval's own `--seed` (which controls
 #   the answer-choice shuffle in the GPQA task) stays fixed at 0, so every team sees the same
 #   prompts in the same order.

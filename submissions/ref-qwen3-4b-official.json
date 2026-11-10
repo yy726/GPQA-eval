@@ -1,0 +1,16 @@
+{
+  "team": "reference",
+  "reference": true,
+  "hf_model_id": "Qwen/Qwen3-4B",
+  "base_model": "Qwen/Qwen3-4B",
+  "method": "Reference: official Qwen post-training (ceiling), default chat template",
+  "datasets": [],
+  "train_gpu_hours_t4": null,
+  "eval": {"harness": "lm-evaluation-harness", "backend": "vllm", "metric": "exact_match,flexible-extract", "config": "scripts/eval_gpqa.sh (locked)"},
+  "scores": {"gpqa_diamond": {"mean": null}, "gpqa_main": {"mean": null}},
+  "decontam": {"max_13gram_overlap_rate": null, "report": "n/a"},
+  "training_notebook": "n/a",
+  "submitted_at": "2026-11-10",
+  "verified": false,
+  "notes": "Officially reported GPQA-Diamond for Qwen3-4B: 41.7 (non-thinking) / 55.9 (thinking), per Qwen model cards. Those use a different setup (longer generation budget, Qwen's own harness), so they are not directly comparable to the locked 4096-token config here. Locked-config scores pending a real Colab T4 run."
+}

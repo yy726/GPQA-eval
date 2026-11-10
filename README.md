@@ -12,13 +12,13 @@ Post-train an open model on a single free Colab T4 GPU and hill-climb GPQA. Publ
 
 | | |
 |---|---|
-| **起点模型** | [`Qwen/Qwen3.5-4B-Base`](https://huggingface.co/Qwen/Qwen3.5-4B-Base)（主赛道）或 [`Qwen/Qwen3.5-2B-Base`](https://huggingface.co/Qwen/Qwen3.5-2B-Base)（迭代快） |
+| **起点模型** | [`Qwen/Qwen3-4B-Base`](https://huggingface.co/Qwen/Qwen3-4B-Base)（主赛道）或 [`Qwen/Qwen3-1.7B-Base`](https://huggingface.co/Qwen/Qwen3-1.7B-Base)（迭代快） |
 | **训练数据** | 公开数据集，推荐 AI2 OLMo 3 的 **Dolci** 系列（SFT / DPO / RL） |
 | **算力** | 只用 Colab T4（16GB），训练总时长 ≤ 4 小时 |
 | **主指标** | **GPQA Diamond**（198 题，4 选 1），lm-evaluation-harness，4 个 seed 取平均 |
 | **第二指标** | GPQA Main（448 题） |
 | **提交** | 公开 HF 模型 + 训练 notebook + `submissions/<team>.json`，以 PR 形式提交 |
-| **天花板参考** | 官方后训练版 [`Qwen/Qwen3.5-4B`](https://huggingface.co/Qwen/Qwen3.5-4B)，用同一配置评测 |
+| **天花板参考** | 官方后训练版 [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B)，用同一配置评测（官方报告 GPQA Diamond：non-thinking 41.7 / thinking 55.9） |
 
 **核心问题：一张 T4、几个小时，你能补回 Qwen 官方后训练带来的多少提升？**
 
@@ -54,8 +54,20 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 ## 为什么这样选 / Design choices
 
-**为什么从 Base 开始，而不是 `Qwen3.5-4B`？**
-官方后训练版在 GPQA Diamond 上已经约 76 分（官方 model card，thinking 模式）。它用了远超 T4 的算力和更强的教师模型。在 T4 上用 LoRA、拿 Dolci 去微调它，大概率会**掉分**。从 Base 出发上升空间大，而且官方版天然就是"天花板"参考。
+**为什么是 Qwen3-4B-Base？——在 T4 + vLLM 上问题最少。**
+我们比较了几个候选（2026-11 的状态）：
+
+| 候选 | T4（sm75，fp16）+ vLLM | 结论 |
+|---|---|---|
+| **Qwen3-4B / 1.7B-Base** | 标准稠密 Transformer（GQA，head_dim 128，纯文本），走 vLLM 最成熟的路径；Unsloth 官方的 Qwen3 (4B) GRPO notebook 就在 T4 上用 vLLM | ✅ 选用 |
+| Qwen3.5-4B-Base | Gated DeltaNet 混合架构 + 视觉编码器；sm75 上有未解决的性能问题（[vllm#36589](https://github.com/vllm-project/vllm/issues/36589)） | ⚠️ 风险中等 |
+| Gemma 4 E2B（Google / Unsloth 版架构相同） | 全局注意力 head_dim=512，Triton kernel 需要 96KB 共享内存，T4 只有 64KB，启动即报错（[vllm#38918](https://github.com/vllm-project/vllm/issues/38918)，修复 [PR #39018](https://github.com/vllm-project/vllm/pull/39018) 未合并） | ❌ 需要打补丁 |
+| OLMo 3 Base | 只有 7B / 32B；7B 的 fp16 权重约 14–15GB，T4 放不下 | ❌ 尺寸不合适 |
+
+另外 Qwen3 是 Apache-2.0、不需要申请访问，和 [RLHF Book 代码](https://github.com/natolambert/rlhf-book/tree/main/code) 用的 Qwen3-0.6B/1.7B 是同一系列。
+
+**为什么从 Base 开始，而不是官方的 `Qwen3-4B`？**
+官方后训练版在 GPQA Diamond 上已经有 41.7（non-thinking）/ 55.9（thinking）（官方 model card）。它用了远超 T4 的算力和更强的教师模型，在 T4 上用 LoRA 再微调它很难涨分。从 Base 出发上升空间大，而且官方版天然就是"天花板"参考。
 
 **为什么是 GPQA？** 研究生水平的科学选择题，答案客观可验证，公开、被广泛引用。缺点是题少（Diamond 只有 198 题，单次评测标准误约 ±3.4 分），所以我们用 4 个 seed 取平均，并加上 GPQA Main 作为第二指标。榜单上差距小于 3 分视为并列。
 
@@ -86,7 +98,7 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 | 项目 | 估计 | 状态 |
 |---|---|---|
-| 4B LoRA（fp16）显存 | ~10 GB（Unsloth 官方数字） | 待 T4 实测 |
+| Qwen3-4B fp16 权重 | ~8 GB；LoRA 训练（seq 4096，梯度检查点）预计 11–14 GB | 待 T4 实测 |
 | 4B LoRA 训练吞吐 | ~1–2k tok/s → 4 小时约 10–25M token | 待 T4 实测 |
 | Dolci 长思维链 | 先按长度过滤（≤ 4k token），再抽 2k–10k 条 | — |
 | GRPO | 每步 2 题 × 4 采样，最长 768 token，几百步 | 待 T4 实测 |
@@ -96,8 +108,9 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 
 ### 已知风险 / Known risks
 
-- **vLLM + Qwen3.5 on T4**：Qwen3.5 是 Gated DeltaNet 混合架构。vLLM ≥ 0.17 原生支持，但我们还没找到它在 T4（sm75）fp16 下跑通的确认。`00` 的 Test 1 专门测这个；如果不行，评测改用 HF 后端，主模型可能改为 2B。
-- **Unsloth + Qwen3.5**：官方不建议 4bit QLoRA；需要 transformers v5；T4 上第一次运行要编译 Triton kernel，会比较慢。`02`/`03` 里留了 `USE_UNSLOTH=False` 的纯 transformers + PEFT 回退路径。
+- **fp16**：T4 没有 bf16，模型以 fp16 运行。Qwen3 在 fp16 下一般稳定，`00` 的 Test 1 会检查输出是否正常（没有乱码或 NaN）。
+- **Thinking 模式**：官方 `Qwen3-4B` 的 chat template 默认开 thinking，在 4096 token 预算下长思考会被截断；这是锁定配置的一部分，对所有人一样。
+- **Unsloth / vLLM 版本冲突**：Colab 上偶尔会互相覆盖依赖（例如 numpy）。评测和训练用不同的 runtime；`02`/`03` 里留了 `USE_UNSLOTH=False` 的纯 transformers + PEFT 回退路径。
 - **Colab 断线**：训练 checkpoint 会自动推到你的私有 `<repo>-ckpt` 仓库，可以续训。
 
 ---
@@ -130,8 +143,8 @@ tests/          脚本的 CPU 单元测试
 ## 参考 / References
 
 - GPQA: Rein et al., 2023. [arXiv:2311.12022](https://arxiv.org/abs/2311.12022) · [dataset](https://huggingface.co/datasets/Idavidrein/gpqa)
-- Qwen3.5: [Qwen/Qwen3.5-4B model card](https://huggingface.co/Qwen/Qwen3.5-4B)
+- Qwen3: [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388) · [Qwen3-4B-Base](https://huggingface.co/Qwen/Qwen3-4B-Base) · [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)
 - OLMo 3 / Dolci: [Olmo 3 technical report](https://arxiv.org/abs/2512.13961) · [Dolci-Think-SFT-7B](https://huggingface.co/datasets/allenai/Dolci-Think-SFT-7B) · [Dolci-Instruct-SFT-7B](https://huggingface.co/datasets/allenai/Dolci-Instruct-SFT-7B)
 - [EleutherAI lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-- [Unsloth Qwen3.5 fine-tuning guide](https://unsloth.ai/docs/zh/mo-xing/qwen3.5/fine-tune) · [TRL](https://github.com/huggingface/trl)
+- [Unsloth notebooks（含 Qwen3 4B GRPO）](https://unsloth.ai/docs/get-started/unsloth-notebooks) · [Unsloth 省显存 RL（T4 + Qwen3-4B）](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide/memory-efficient-rl) · [TRL](https://github.com/huggingface/trl)
 - 课程教材：[RLHF Book](https://rlhfbook.com)（第 4 章 SFT、第 6 章策略梯度 / GRPO、第 8 章 DPO）

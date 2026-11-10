@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SUB_DIR = ROOT / "submissions"
 SCHEMA = SUB_DIR / "schema.json"
 OUT = ROOT / "LEADERBOARD.md"
-ALLOWED_BASES = {"Qwen/Qwen3.5-4B-Base", "Qwen/Qwen3.5-2B-Base"}
+ALLOWED_BASES = {"Qwen/Qwen3-4B-Base", "Qwen/Qwen3-1.7B-Base"}
 
 HEADER = """# Leaderboard / 排行榜
 

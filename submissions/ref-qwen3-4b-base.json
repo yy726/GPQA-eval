@@ -1,9 +1,9 @@
 {
   "team": "reference",
   "reference": true,
-  "hf_model_id": "Qwen/Qwen3.5-4B",
-  "base_model": "Qwen/Qwen3.5-4B",
-  "method": "Reference: official Qwen post-training (ceiling), default chat template",
+  "hf_model_id": "Qwen/Qwen3-4B-Base",
+  "base_model": "Qwen/Qwen3-4B-Base",
+  "method": "Reference: starting point, no post-training",
   "datasets": [],
   "train_gpu_hours_t4": null,
   "eval": {"harness": "lm-evaluation-harness", "backend": "vllm", "metric": "exact_match,flexible-extract", "config": "scripts/eval_gpqa.sh (locked)"},

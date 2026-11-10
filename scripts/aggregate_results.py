@@ -7,7 +7,7 @@ The script only reads lm-eval's `results_*.json` files (aggregate metrics). It n
 or copies the per-sample logs, so the output is safe to publish under the GPQA terms.
 
 Usage:
-    python scripts/aggregate_results.py results/my-team --model my-team/qwen35-4b-sft \
+    python scripts/aggregate_results.py results/my-team --model my-team/qwen3-4b-sft \
         --team my-team --out submissions/my-team.json
 """
 
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("results_dir", type=Path, help="Directory passed as out_dir to eval_gpqa.sh")
     p.add_argument("--model", required=True, help="HF model id that was evaluated")
     p.add_argument("--team", default=None, help="Team name (defaults to the model owner)")
-    p.add_argument("--base-model", default="Qwen/Qwen3.5-4B-Base")
+    p.add_argument("--base-model", default="Qwen/Qwen3-4B-Base")
     p.add_argument("--backend", default="vllm", choices=["vllm", "hf"])
     p.add_argument("--metric", default=DEFAULT_METRIC)
     p.add_argument("--out", type=Path, default=None, help="Write JSON here (default: stdout)")

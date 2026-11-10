@@ -1,7 +1,7 @@
 {
   "team": "example-team",
-  "hf_model_id": "example-team/qwen35-4b-dolci-sft",
-  "base_model": "Qwen/Qwen3.5-4B-Base",
+  "hf_model_id": "example-team/qwen3-4b-dolci-sft",
+  "base_model": "Qwen/Qwen3-4B-Base",
   "method": "LoRA SFT (r=16) on 5k Dolci-Think-SFT math/science rows <=4k tokens, 1 epoch",
   "datasets": ["allenai/Dolci-Think-SFT-7B:train"],
   "train_gpu_hours_t4": 3.2,

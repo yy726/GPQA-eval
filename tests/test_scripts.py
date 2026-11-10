@@ -85,7 +85,7 @@ def test_example_and_reference_submissions_validate():
 def test_bad_base_model_rejected():
     schema = json.loads((ROOT / "submissions" / "schema.json").read_text())
     sub = json.loads((ROOT / "submissions" / "_example.json").read_text())
-    sub["base_model"] = "Qwen/Qwen3.5-4B"  # starting from the post-trained model is not allowed
+    sub["base_model"] = "Qwen/Qwen3-4B"  # starting from the post-trained model is not allowed
     assert build_leaderboard.validate(sub, schema)
 
 
