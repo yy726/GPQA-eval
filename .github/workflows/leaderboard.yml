@@ -1,0 +1,49 @@
+name: leaderboard
+
+on:
+  pull_request:
+    paths: ["submissions/**", "scripts/**", "tests/**"]
+  push:
+    branches: [main]
+    paths: ["submissions/**", "scripts/build_leaderboard.py"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install jsonschema pytest
+      - name: Unit tests
+        run: python -m pytest -q tests
+      - name: Validate submissions
+        run: python scripts/build_leaderboard.py --check
+
+  publish:
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install jsonschema
+      - run: python scripts/build_leaderboard.py
+      - name: Commit LEADERBOARD.md if it changed
+        run: |
+          if git diff --quiet LEADERBOARD.md; then
+            echo "Leaderboard unchanged."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add LEADERBOARD.md
+            git commit -m "Update leaderboard"
+            git push
+          fi

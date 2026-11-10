@@ -1,0 +1,24 @@
+{
+  "team": "example-team",
+  "hf_model_id": "example-team/qwen35-4b-dolci-sft",
+  "base_model": "Qwen/Qwen3.5-4B-Base",
+  "method": "LoRA SFT (r=16) on 5k Dolci-Think-SFT math/science rows <=4k tokens, 1 epoch",
+  "datasets": ["allenai/Dolci-Think-SFT-7B:train"],
+  "train_gpu_hours_t4": 3.2,
+  "eval": {
+    "harness": "lm-evaluation-harness",
+    "backend": "vllm",
+    "metric": "exact_match,flexible-extract",
+    "config": "scripts/eval_gpqa.sh (locked)",
+    "versions": {"lm_eval": "0.4.13", "vllm": "x.y.z", "transformers": "x.y.z"}
+  },
+  "scores": {
+    "gpqa_diamond": {"mean": 35.1, "stderr": 1.2, "per_seed": {"0": 34.3, "1": 36.9, "2": 33.3, "3": 35.9}},
+    "gpqa_main": {"mean": 33.0, "stderr": 0.8, "per_seed": {"0": 32.1, "1": 33.9, "2": 32.6, "3": 33.4}}
+  },
+  "decontam": {"max_13gram_overlap_rate": 0.0, "report": "decontam.json: 5000 rows checked, 0 flagged"},
+  "training_notebook": "https://github.com/example-team/notebooks/blob/main/sft.ipynb",
+  "submitted_at": "2026-11-15",
+  "verified": false,
+  "notes": "Illustrative numbers only - this file is skipped by the leaderboard."
+}

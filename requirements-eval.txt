@@ -1,0 +1,6 @@
+# Evaluation environment (Colab T4). Lower bounds checked against PyPI on 2026-11-10.
+# After the TA smoke test on a real T4, replace these with exact `==` pins and record them here.
+lm-eval[vllm]>=0.4.13
+vllm>=0.17.0
+transformers>=5.0
+datasets

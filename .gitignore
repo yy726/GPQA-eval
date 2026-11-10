@@ -1,0 +1,10 @@
+# lm-eval outputs contain GPQA questions (--log_samples). Never commit them.
+results/
+data/
+outputs/
+checkpoints/
+*.jsonl
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+wandb/
