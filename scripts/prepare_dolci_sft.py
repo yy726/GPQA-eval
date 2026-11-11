@@ -28,7 +28,8 @@ from collections import Counter
 from pathlib import Path
 
 DEFAULT_DATASET = "allenai/Dolci-Think-SFT-7B"
-SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset", "domain")
+SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset")
+DOMAIN_KEYS = ("domain", "category", "task_type")
 
 # Plain ChatML (the format Qwen3 uses). Some *-Base tokenizers ship without a chat template;
 # we fall back to this so token counts match what training / evaluation will see.
@@ -77,6 +78,19 @@ def get_source(ex: dict) -> str:
     return "unknown"
 
 
+def get_domain(ex: dict) -> str:
+    for k in DOMAIN_KEYS:
+        if isinstance(ex.get(k), str):
+            return ex[k]
+    return ""
+
+
+def filter_key(ex: dict) -> str:
+    """Text that --include/--exclude are matched against: source name plus domain (Dolci has both)."""
+    domain = get_domain(ex)
+    return f"{get_source(ex)} | {domain}" if domain else get_source(ex)
+
+
 THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
@@ -110,8 +124,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--n", type=int, default=5000, help="Number of examples to keep")
     p.add_argument("--max-tokens", type=int, default=4096, help="Drop examples longer than this")
     p.add_argument("--tokenizer", default="unsloth/Qwen3-0.6B-Base-unsloth-bnb-4bit")
-    p.add_argument("--include", nargs="*", default=[], help="Keep only sources containing any of these substrings")
-    p.add_argument("--exclude", nargs="*", default=[], help="Drop sources containing any of these substrings")
+    p.add_argument("--include", nargs="*", default=[],
+                   help="Keep only rows whose source name or domain contains any of these substrings (case-insensitive)")
+    p.add_argument("--exclude", nargs="*", default=[],
+                   help="Drop rows whose source name or domain contains any of these substrings (checked first)")
     p.add_argument("--strip-think", action="store_true",
                    help="Remove <think>...</think> from the assistant answer (short-answer style)")
     p.add_argument("--shuffle-buffer", type=int, default=10_000,
@@ -127,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     ds = load_dataset(args.dataset, split=args.split, streaming=True)
 
     if args.list_sources:
-        c = Counter(get_source(ex) for _, ex in zip(range(args.list_sources), ds))
+        c = Counter(filter_key(ex) for _, ex in zip(range(args.list_sources), ds))
         for src, k in c.most_common():
             print(f"{k:8d}  {src}")
         return 0
@@ -147,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             print("columns:", sorted(ex.keys()), file=sys.stderr)
         stats["scanned"] += 1
         source = get_source(ex)
-        if not keep_source(source, args.include, args.exclude):
+        if not keep_source(filter_key(ex), args.include, args.exclude):
             stats["drop_source"] += 1
             continue
         msgs = get_messages(ex)
@@ -168,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             stats["drop_length"] += 1
             continue
         pc["source"] = source
+        pc["domain"] = get_domain(ex)
         pc["n_tokens"] = n_tok
         kept.append(pc)
 
@@ -181,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     by_source = Counter(ex["source"] for ex in kept)
     print(json.dumps({"kept": len(kept), "total_tokens": total_tokens, **stats}, indent=2))
     print("top sources:", by_source.most_common(15))
+    by_domain = Counter(ex.get("domain", "") for ex in kept)
+    if any(by_domain):
+        print("domains:", by_domain.most_common(10))
     if by_source and set(by_source) == {"unknown"}:
         print(f"[i] no source column recognised (tried {SOURCE_KEYS}); --include/--exclude have no effect",
               file=sys.stderr)

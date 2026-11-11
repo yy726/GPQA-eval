@@ -5,7 +5,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `notebooks/11_sft_grpo_unsloth.ipynb` | **推荐先跑**：照 Unsloth 官方 Qwen3 Instruct / GRPO notebook 的写法，SFT 预热（Dolci + 选择题格式）→ GRPO（SciQ 选择题，可验证奖励），在同一个 vLLM 引擎里对 base / SFT / GRPO 各做一次 GPQA 快速评测。`MODE="quick"` 约 15–25 分钟（待实测） |
+| `notebooks/11_sft_grpo_unsloth.ipynb` | **主力 notebook**：照 Unsloth 官方 Qwen3 Instruct / GRPO notebook 的写法，SFT（Dolci 按科学/数学过滤 + 可选短思维链 + 选择题格式）→ GRPO（SciQ 或 MMLU-Pro STEM，可验证奖励 + 截断惩罚），base / SFT / GRPO 各做一次 GPQA 快速评测，W&B 记录。模式 `quick` / `medium` / `a100` |
 | `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
 | `notebooks/03_grpo_mcq_lora.ipynb` | 进阶：选择题 GRPO |
@@ -58,3 +58,33 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 | SFT / GRPO 之后模型答完不停，截断率 100%，GRPO 每个回答都是满长度、格式奖励≈0 | `unsloth/Qwen3-*-Base` 的 eos 是 `<|endoftext|>`，ChatML 每轮以 `<|im_end|>` 结束（run1） | 加载后设置 `tokenizer.eos_token = "<|im_end|>"`、`model.generation_config.eos_token_id = [<|im_end|>, <|endoftext|>]`，采样时传 `stop_token_ids`（notebook 02/03/10/11 已处理）。这样保存的模型在 lm-eval 里也会停 |
 | `prepare_dolci_sft.py` 报 chat template 相关错误 | `unsloth/Qwen3-*-Base` 的 tokenizer 没有 chat_template | 脚本已自动用 ChatML 兜底；notebook 里用 Unsloth 的 `qwen3-instruct` 模板 |
 | `prepare_dolci_sft.py` 打印完结果后卡住 | 流式读取的后台线程不退出 | 脚本结尾已强制退出 |
+
+## A100（仅本分支，不参与排名）
+
+比赛规则仍然是 T4；下面是 yy726 在 Colab A100 40GB 上探索上限用的预算。数字是按 run2 推算的估计，X1 之后用实测替换。
+
+**算力**：A100 每小时约 5.4–13 个 compute unit（以 Colab"资源"面板为准）。300 CU / 5 次实验 ≈ 每次 60 CU ≈ 4.6–11 小时；按**每次约 3 小时**规划，留余量给失败重跑和最后的锁定评测。
+
+| 模型（A100 40GB） | 训练方式 | SFT 吞吐（估） | GRPO（估） |
+|---|---|---|---|
+| Qwen3-1.7B | 16-bit LoRA | ~6.6k tok/s（run2 实测） | ~7 秒/步（run2 实测，16 × ≤768 token） |
+| **Qwen3-4B**（推荐） | 16-bit LoRA r=64 | ~3.5k tok/s，≈12M token/小时 | ~20–30 秒/步（16 × ≤1536 token） |
+| Qwen3-8B | 16-bit LoRA | ~1.5–2k tok/s | 更慢；不在比赛允许的起点里 |
+
+**每次实验（4B，`MODE="a100"`）**：SFT 约 1 小时（≈ 2 万条 Dolci-Instruct，平均约 560 token；或 6–8k 条短思维链）+ GRPO 150 步（约 1–1.25 小时）+ 三次快速评测（Diamond 198 + Main 448 题）。**5 次合计**约 6000 万 SFT token、约 750–1000 GRPO 步。
+**全量 Dolci 不现实**：Instruct 约 215 万条（≈1–1.5B token，4B 要 100+ 小时）；Think 约 190 万条（>10B token）。
+
+**策略**（详见 `results.md` 的 X1–X5）：
+1. 先修好"答完要停"（停止 token + 截断惩罚 + 诊断）。
+2. SFT 数据对准 GPQA：按 `source_dataset` / `domain` 只留科学、数学、逻辑；加 ≤3k token 的短思维链。
+3. SciQ 只用来教格式（约 2000 条）。
+4. GRPO 用更难的题：MMLU-Pro STEM（4 选 1），关注 W&B 里的 `frac_reward_zero_std`（组内奖励全相同的比例，越高学习信号越弱）。
+5. SFT 合并后推到 HF（`PUSH_SFT_REPO`），后面的实验用 `INIT_MODEL` + `RUN_SFT=False` 复用，省额度。
+
+## Weights & Biases
+
+notebook 11 会自动记录（写法同 [rlhf-book `policy_gradients/train.py`](https://github.com/natolambert/rlhf-book/tree/main/code/policy_gradients)：环境变量优先，没有 key 就 `mode="disabled"`）：
+1. 在 https://wandb.ai/authorize 拿 API key，放进 Colab 左侧 🔑 Secrets，名字叫 `WANDB_API_KEY`。
+2. 可选：在配置格改 `WANDB_PROJECT`（默认 `gpqa-hackathon`）/ `WANDB_ENTITY`；`EXP_NAME` 决定 run 名（`X1-Qwen3-4B-Base-a100`）。
+3. 记录内容：SFT 和 GRPO 的训练曲线（loss、各项奖励、回答长度、`frac_reward_zero_std`…）、每个阶段的 GPQA 快速评测（`gpqa/<set>/<stage>/*` 在 run summary 里，外加一张汇总表）、报告 JSON（artifact）、全部配置。
+4. **不会**上传 GPQA 题目或模型生成内容（`log_completions=False`）。

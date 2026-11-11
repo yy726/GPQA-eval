@@ -81,3 +81,14 @@ def test_chatml_fallback_template():
     tok = prepare_dolci_sft.ensure_chat_template(Tok())
     assert tok.chat_template == prepare_dolci_sft.CHATML_TEMPLATE
     assert prepare_dolci_sft.count_chat_tokens(tok, [{"role": "user", "content": "x"}]) == 3
+
+
+def test_filter_key_uses_source_and_domain():
+    ex = {"source_dataset": "Dolci Instruct OpenThoughts3+ Science", "domain": "Science", "messages": []}
+    key = prepare_dolci_sft.filter_key(ex)
+    assert key == "Dolci Instruct OpenThoughts3+ Science | Science"
+    assert prepare_dolci_sft.keep_source(key, ["science", "math"], ["python", "code"])
+    code_row = {"source_dataset": "Dolci Instruct Python Algorithms", "domain": "Coding"}
+    assert not prepare_dolci_sft.keep_source(prepare_dolci_sft.filter_key(code_row), ["science", "math"], ["python"])
+    # no domain column: falls back to the source name only
+    assert prepare_dolci_sft.filter_key({"source": "Tulu 3 Persona MATH"}) == "Tulu 3 Persona MATH"
