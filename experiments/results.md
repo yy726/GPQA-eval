@@ -1,6 +1,6 @@
 # 结果汇总 / Results
 
-> 由 Colab T4 上的 `notebooks/11_sft_grpo_unsloth.ipynb`（快速评测）和 `notebooks/10_iterate_0p6b.ipynb`（锁定评测）产出，数字只包含聚合指标。
+> 由 Colab（T4 / A100）上的 `notebooks/11_sft_grpo_unsloth.ipynb`（快速评测）和 `notebooks/10_iterate_0p6b.ipynb`（锁定评测）产出，数字只包含聚合指标。
 
 ## notebook 11（SFT + GRPO；快速评测，只在同一次运行内比较）
 
@@ -47,28 +47,46 @@ GRPO 日志：总奖励 2.49 → 2.83；格式奖励 0.84 → 0.99；正确率�
 4. **SciQ 对 GRPO 来说太简单**（约 92% 答对，组内差异小），需要更难的题库 → 新增 `GRPO_DATA="mmlu_pro_stem"`。
 5. Dolci-Instruct 的来源里只有约 7% 是科学（OpenThoughts3+ Science），代码、多语言、指令遵循占了很大比例 → 新增按 `source_dataset` / `domain` 过滤。
 
-### 下一步：A100 上 5 次实验（Qwen3-4B-Base，`MODE="a100"`，每次约 3 小时）
+### run3 = X1 · 2026-11-11 · Qwen3-4B-Base · `a100` · **A100 40GB**（[带输出的 notebook](runs/run3_x1_a100_qwen3-4b.ipynb)）
 
-| # | 配置 | 要回答的问题 |
-|---|---|---|
-| X1 | Instruct（科学/数学/逻辑）2 万 + SciQ 2000 → GRPO SciQ 150 步（含截断惩罚）；`PUSH_SFT_REPO` 保存 SFT | 答完会不会停；4B 基线 |
-| X2 | `THINK_N=8000`（≤3072 token 的短思维链）+ Instruct 8000 + SciQ 2000 → 同样的 GRPO | 短思维链有没有帮助 |
-| X3 | `RUN_SFT=False`、`INIT_MODEL`=X1/X2 中更好的 SFT → `GRPO_DATA="mmlu_pro_stem"` | 更难的 RL 数据能不能提分 |
-| X4 | 按 X3 的 W&B 曲线调一项：`GRPO_LR` 5e-6 → 2e-5，或步数 / 组大小 | GRPO 调参 |
-| X5 | 最佳配置 → 合并 → 推 HF → `main` 的 `01` 锁定评测（4 seeds） | 正式分数（注明 A100，不参与排名） |
+配置：Dolci-Instruct（科学/数学/逻辑）1 万条 + SciQ 格式 2000 条 → SFT 750 步（20.6 分钟）→ GRPO SciQ 150 步（38 分钟，每步 2 题 × 8，回答 ≤1536）。快速评测生成上限被截到 3374（`MAX_SEQ_LEN=6144`）。
 
-### 加入新配方后的安排（300 CU；时间为估计，以 Colab 资源面板为准）
+| 阶段 | Diamond flex | Main flex | strict（D / M） | 可提取率（D / M） | 截断率（D / M） | 平均 token | 评测时间 |
+|---|---|---|---|---|---|---|---|
+| base | 25.8 | 24.6 | 0.5 / 0.2 | 78 / 81 | 41 / 37 | ~1600 | 7 分钟 |
+| SFT | **34.8** | 28.1 | 30.8 / 30.1 | 91 / 92 | **97 / 97** | ~3300 | 16.5 分钟 |
+| GRPO | 29.8 | **29.9** | 27.3 / 27.9 | 88 / 88 | **19 / 15** | ~780 | 4.6 分钟 |
 
-| 顺序 | notebook | 内容 | 时间 |
+（单样本；Diamond 标准误约 ±3.4，Main 约 ±2.1。）
+
+观察：
+1. **SFT 有效**：两个集合合起来（646 题）base 约 25.0 → SFT 约 30.2。
+2. **GRPO 只学会了停**：截断率 97% → 15–19%，回答短了 4 倍，但合计准确率约 29.9，和 SFT 持平（Diamond −5、Main +1.8 都在噪声内）。日志：截断比例 0.71 → 0.02；SciQ 正确率奖励 1.75 → 1.90；结束时 **82% 的组内 8 个回答奖励完全相同**（`frac_reward_zero_std` 0.82）——SciQ 太简单，几乎没有学习信号。另外每步只有 2 道题，150 步一共才 300 道题。
+3. **"答完不停"的根因找到了**：诊断输出里模型答完写的是 `\tNdrFc`（token 70564，C# 代码 `NdrFcShort` 的碎片，Qwen 词表里的欠训练 glitch token），然后用普通文本接着编 "What is the correct answer to this question:…"。训练标签里确实有 `<|im_end|>`，但 Qwen3-4B-Base 预训练几乎没输出过 `<|im_end|>`，**输出层这一行欠训练**，而 4B 的输入/输出嵌入是共享的、LoRA 改不了——SFT 学到的"该结束了"方向落到了邻近的 glitch token 上。`<|im_start|>` 同理，所以"新一轮"也是普通文本，stop 条件抓不到。GRPO 的截断惩罚逼模型改用预训练里见得多的 `<|endoftext|>` 结束（`finish=stop`、`stop_reason=None`）。
+4. **修法（照 OLMo 3 / open-instruct）**：最后一个 assistant 回合以 eos=`<|endoftext|>` 结束（open-instruct 的 `olmo` 模板就是这样，`<|im_end|>` 只用在中间回合 / 工具调用），`generation_config.eos_token_id` 同时包含两个结束符；open-instruct 给新 token 的嵌入行"播种"，并且明确不支持和 LoRA 一起用——和我们遇到的问题一致。→ `recipe_utils.setup_chat(style="olmo")`。
+5. 实测速度：SFT 6.6k token/秒（4B，810 万 token 20.6 分钟），GRPO 15 秒/步（16 个回答，≤1536），整轮约 1.6 小时。
+6. 数据：`include=["logic"]` 抽到了 2900 条 Logic Puzzles（29%），科学只有约 19%。→ 去掉 logic。
+
+### 之后的修改（notebook 11 新版，以及 12/13）
+
+- 模板 `CHAT_STYLE="olmo"`（见上）；评测加 `repeat_rate` / `answer_then_more` / `glitch_rate`；SFT 后 teacher forcing 检查 eos 概率。
+- **锁定评测生成预算 4096 → 8192**（main 规则，2026-11-11）。`a100` 预设：上下文 12288、快速评测 8192、SFT 样本 ≤6144、GRPO 回答 ≤6144，截断惩罚改成 DAPO 的软超长惩罚（最后 1024 token 线性扣到 −1）。
+- SFT：去掉 logic；`SFT_SELECT="coverage"`（Dr.SCI 的 EESFT：按 4-gram 覆盖度从 3 倍候选里挑）。
+- GRPO（照 OLMo 3 / DAPO / Dr.SCI）：MMLU-Pro STEM 选择题 + Dr.SCI 数值题；每段开始前按当前模型通过率预筛（留 1–3/4）；两段课程（Dr.SCI 通过率 0.5–0.875 → 0.25–0.375）；每步 4 道题 × 8；`epsilon_high=0.28`；常数学习率；格式分 0.5。
+- 流程照 OLMo 3：**SFT → DPO → GRPO**（OLMo 3：RL 从 DPO 检查点开始更好）。DPO 用 OLMo 3 公开的 `allenai/Dolci-Instruct-DPO` 里的 delta learning 对（chosen = Qwen3-32B，rejected = Qwen3-0.6B），合规，可以上榜。
+
+### 下一步（300 CU；时间为估计）
+
+| 顺序 | notebook | 内容 | 时间（估） |
 |---|---|---|---|
-| X1 | 11 | 按上表（`PUSH_SFT_REPO` 一定要设，后面都从它开始） | 约 3 小时 |
-| D1 | 12 | `INIT_MODEL` = X1 的 SFT → 在线偏好对 DPO（MMLU-Pro STEM） | 约 1.2 小时 |
-| P1 | 14 | 探针：`BACKBONE` = base 和 X1 的 SFT 各一次 | 约 2 × 40 分钟 |
+| X1b | 11 | SFT（新模板、无 logic、coverage 选择）；`RUN_GRPO=False`，**设 `PUSH_SFT_REPO`** | 约 1.2 小时 |
+| D1 | 12 | `INIT_MODEL`=X1b SFT，`DPO_DATA="dolci"`（约 8000 对科学/数学 delta 对），**设 `PUSH_REPO`** | 约 40 分钟 |
+| R1 | 11 | `RUN_SFT=False`、`INIT_MODEL`=D1，`GRPO_DATA="mix"`，两段课程 | 约 2–3 小时 |
+| P1 | 14 | 知识探针：base / X1b SFT 各一次 | 约 2 × 40 分钟 |
 | K1 | 13 | Qwen3-32B → 4B 蒸馏（只作参考） | 约 2 小时 |
-| X2 / X3 | 11 | 数据对比（见 `DATASETS.md`：短思维链 vs 教材短答案）或换 GRPO 题库 | 各约 3 小时 |
-| 终跑 | 11 或 12 | 最好的方案 → 推 HF → `01` 锁定评测 | 约 3 小时 |
+| 终跑 | — | 最好的模型 → 推 HF（公开）→ `main` 的 `01` 锁定评测（8192） | 约 1.5 小时 |
 
-合计约 15–16 小时；A100 每小时 5.4–13 CU，按低档算在 300 CU 以内，按高档会超，届时砍掉 X2/X3 中的一个。
+成功标准：X1b 的 SFT 后截断率 < 30%、`glitch_rate` ≈ 0、teacher forcing 的 eos 概率接近 1；R1 的合计准确率高于 X1b。
 
 ## notebook 10（锁定评测）
 

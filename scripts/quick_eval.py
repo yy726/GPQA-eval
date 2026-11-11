@@ -9,7 +9,7 @@ Never prints questions or model outputs. Writes a JSON with {config: metrics}.
 
 Usage:
     python scripts/quick_eval.py --model outputs/merged --configs gpqa_diamond gpqa_main \
-        --max-tokens 4096 --gpu-util 0.5 --out outputs/eval_after.json
+        --max-tokens 8192 --gpu-util 0.5 --out outputs/eval_after.json
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from recipe_utils import STOP_STRS, build_gpqa, chat_prompt, score_vllm_outputs, setup_chatml_stop  # noqa: E402
+from recipe_utils import STOP_STRS, build_gpqa, chat_prompt, score_vllm_outputs, setup_chat  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,8 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--model", required=True, help="HF id or local path of a merged (non-LoRA) model")
     p.add_argument("--configs", nargs="+", default=["gpqa_diamond"])
     p.add_argument("--n", type=int, default=None, help="Only the first N questions of each config")
-    p.add_argument("--max-tokens", type=int, default=4096)
-    p.add_argument("--max-model-len", type=int, default=6144)
+    p.add_argument("--max-tokens", type=int, default=8192, help="Locked eval budget is 8192 since 2026-11-11")
+    p.add_argument("--max-model-len", type=int, default=12288)
+    p.add_argument("--chat-style", default="olmo", choices=["olmo", "plain", "chatml"],
+                   help="Template to use only if the model's tokenizer has none (base models)")
     p.add_argument("--gpu-util", type=float, default=0.5, help="Fraction of GPU memory vLLM may take")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tag", default="eval")
@@ -47,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     from vllm import LLM, SamplingParams
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    stop_ids = setup_chatml_stop(tok)
+    stop_ids = setup_chat(tok, style=args.chat_style, force=False)
     sets = {cfg: build_gpqa(cfg, args.n) for cfg in args.configs}
     texts = {cfg: [chat_prompt(tok, q) for q, _ in rows] for cfg, rows in sets.items()}
     longest = max(len(tok(t, add_special_tokens=False)["input_ids"]) for ts in texts.values() for t in ts)

@@ -5,11 +5,11 @@
 
 | 文件 | 作用 |
 |---|---|
-| `notebooks/11_sft_grpo_unsloth.ipynb` | **主力 notebook**：照 Unsloth 官方 Qwen3 Instruct / GRPO notebook 的写法，SFT（Dolci 按科学/数学过滤 + 可选短思维链 + 选择题格式）→ GRPO（SciQ 或 MMLU-Pro STEM，可验证奖励 + 截断惩罚），base / SFT / GRPO 各做一次 GPQA 快速评测，W&B 记录。模式 `quick` / `medium` / `a100` |
-| `notebooks/12_dpo_unsloth.ipynb` | **DPO**：从 11 的 SFT 模型出发，默认用"自己采样的回答"组成偏好对（答对且收尾 vs 答错或没停），也可用 Dolci DPO；可迭代 |
+| `notebooks/11_sft_grpo_unsloth.ipynb` | **主力 notebook**：SFT（Dolci 科学/数学 + 可选思维链 / 额外数据 + 4-gram 覆盖度选样 + 选择题格式）→ GRPO（MMLU-Pro STEM + Dr.SCI 数值题，通过率预筛 + 两段课程 + 软超长惩罚），OLMo 风格结束符，GPQA 快速评测（≤8192）+ 诊断，W&B。模式 `quick` / `medium` / `a100` |
+| `notebooks/12_dpo_unsloth.ipynb` | **DPO**：从 11 的 SFT 模型出发，默认用 OLMo 3 公开的 Dolci-Instruct-DPO（delta learning：Qwen3-32B vs 0.6B），也可用自己采样的"答对且收尾 vs 答错或没停"；可迭代 |
 | `notebooks/13_distill_gkd.ipynb` | **知识蒸馏（GKD）**：Qwen3-32B（4-bit）→ Qwen3-4B-Base，离线对齐老师的逐 token 分布。**只作参考，不参与排名** |
 | `notebooks/14_decision_probe.ipynb` | **Decision 知识探针**：加打分头直接选选项（不生成文字），测 4B 不写思维链"知道"多少。只做分析，不能提交 |
-| `scripts/recipe_utils.py` / `scripts/quick_eval.py` | 12–14 共用：题面、答案提取、快速评测（与 11 同口径）、去污染、多数据源抽样 |
+| `scripts/recipe_utils.py` / `scripts/quick_eval.py` / `scripts/select_coverage.py` | 11–14 共用：聊天模板与结束符、题面、答案提取与诊断指标、GRPO 奖励（选择题 / 数值题 / 软超长惩罚）、Dr.SCI 与 Dolci DPO 转换、去污染、多数据源抽样、4-gram 覆盖度选样 |
 | `experiments/DATASETS.md` | 可能对 GPQA 有用的数据集（MegaScience、Dr.SCI、OpenThoughts3…）和用法 |
 | `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
@@ -27,7 +27,7 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 | 模型 | non-thinking | thinking | 结论 |
 |---|---|---|---|
 | Qwen3-0.6B | 22.9 | 27.9 | 官方完整后训练都在随机水平附近 → **只适合验证流程**，能观察到的主要是格式指标（可提取率、截断率） |
-| Qwen3-1.7B | 28.6 | 40.1 | **能看到 GPQA 变化的最小尺寸**；提升主要靠长推理，4096 token 预算会限制它 |
+| Qwen3-1.7B | 28.6 | 40.1 | **能看到 GPQA 变化的最小尺寸**；提升主要靠长推理，生成预算（现为 8192）会限制它 |
 | Qwen3-4B | 41.7 | 55.9 | 变化最清楚；Unsloth 官方 T4 GRPO 示例用的就是 4B（16-bit LoRA） |
 
 建议：0.6B + `MODE="quick"` 先确认流程 → 1.7B 跑 `full` 看 SFT / GRPO 的变化 → 4B 做最终提交。
@@ -49,7 +49,7 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 
 - `scores.gpqa_diamond.mean`：主指标（1 个 seed 时噪声约 ±3 分；0.6B 接近 25% 的随机水平是正常的）。
 - `diagnostics.*.flexible-extract.extract_rate`：能提取出答案字母的比例。低说明是**格式问题**，SFT/GRPO 很容易改善。
-- `diagnostics.*.length.truncation_rate`：打满 4096 token 的比例。高说明**思维链太长被截断**，可以考虑去掉 `<think>`（E3）或筛选更短的样本。
+- `diagnostics.*.length.truncation_rate`：打满生成预算（现为 8192 token；第一轮实验时是 4096）的比例。高说明**思维链太长被截断**，可以考虑去掉 `<think>`（E3）或筛选更短的样本。
 - `pred_letter_dist`：如果几乎全是同一个字母，说明模型在"猜"，分数没有意义。
 
 每次运行后，把 notebook 最后打印的 JSON 贴给 Claude，结果汇总到 [results.md](results.md)。
@@ -60,31 +60,27 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 |---|---|---|
 | `RuntimeError: FlashInfer top-p/top-k sampling unavailable: unsupported compute capability 7.5. Unset VLLM_USE_FLASHINFER_SAMPLER=1.` | Unsloth（2026.11）在 T4 上给 vLLM 设置 `VLLM_USE_FLASHINFER_SAMPLER=1`；新版 vLLM（如 0.33）在计算能力 7.5 上不支持这个采样器，被强制打开时直接报错 | 在 `from unsloth import ...` / 加载模型之前设置 `os.environ["UNSLOTH_VLLM_NO_FLASHINFER"] = "1"` 和 `os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"`（notebook 10 / 11 已自动处理）。在已经报错的 runtime 里，设置后重跑加载那一格即可，不用重装 |
 | 装出来的 vLLM 不是 notebook 里写的版本 | 安装输出被隐藏时，失败看不到 | notebook 已去掉 `%%capture`；装完会打印实际版本，贴回来时请一起附上 |
-| SFT / GRPO 之后模型答完不停，截断率 100%，GRPO 每个回答都是满长度、格式奖励≈0 | `unsloth/Qwen3-*-Base` 的 eos 是 `<|endoftext|>`，ChatML 每轮以 `<|im_end|>` 结束（run1） | 加载后设置 `tokenizer.eos_token = "<|im_end|>"`、`model.generation_config.eos_token_id = [<|im_end|>, <|endoftext|>]`，采样时传 `stop_token_ids`（notebook 02/03/10/11 已处理）。这样保存的模型在 lm-eval 里也会停 |
+| SFT 之后模型答完不停（截断率 95–97%），答案后面出现 `\tNdrFc` 然后接着编下一题 | Qwen3 Base 预训练几乎没输出过 `<|im_end|>`，输出层这一行欠训练，4B 嵌入共享、LoRA 改不了；模型学成了输出邻近的 glitch token（run1–X1，见 `results.md`） | **照 OLMo 3：回答以 `<|endoftext|>` 结束**（`recipe_utils.setup_chat(style="olmo")`，notebook 11–13 已改；02/03/10 是旧 notebook 仍用 `<|im_end|>`）。`generation_config` 里两个结束符都停，保存的模型在 lm-eval 里也会停 |
 | `prepare_dolci_sft.py` 报 chat template 相关错误 | `unsloth/Qwen3-*-Base` 的 tokenizer 没有 chat_template | 脚本已自动用 ChatML 兜底；notebook 里用 Unsloth 的 `qwen3-instruct` 模板 |
 | `prepare_dolci_sft.py` 打印完结果后卡住 | 流式读取的后台线程不退出 | 脚本结尾已强制退出 |
 
 ## A100（仅本分支，不参与排名）
 
-比赛规则仍然是 T4；下面是 yy726 在 Colab A100 40GB 上探索上限用的预算。数字是按 run2 推算的估计，X1 之后用实测替换。
+比赛规则仍然是 T4；下面是 yy726 在 Colab A100 40GB 上探索上限用的预算（4B 的数字是 X1 实测）。
 
 **算力**：A100 每小时约 5.4–13 个 compute unit（以 Colab"资源"面板为准）。300 CU / 5 次实验 ≈ 每次 60 CU ≈ 4.6–11 小时；按**每次约 3 小时**规划，留余量给失败重跑和最后的锁定评测。
 
 | 模型（A100 40GB） | 训练方式 | SFT 吞吐（估） | GRPO（估） |
 |---|---|---|---|
 | Qwen3-1.7B | 16-bit LoRA | ~6.6k tok/s（run2 实测） | ~7 秒/步（run2 实测，16 × ≤768 token） |
-| **Qwen3-4B**（推荐） | 16-bit LoRA r=64 | ~3.5k tok/s，≈12M token/小时 | ~20–30 秒/步（16 × ≤1536 token） |
+| **Qwen3-4B**（推荐） | 16-bit LoRA r=64 | **~6.6k tok/s（X1 实测）**，≈24M token/小时 | **~15 秒/步（X1 实测，16 × ≤1536 token）**；新版每步 32 × ≤6144，估 1–2 分钟/步 |
 | Qwen3-8B | 16-bit LoRA | ~1.5–2k tok/s | 更慢；不在比赛允许的起点里 |
 
-**每次实验（4B，`MODE="a100"`）**：SFT 约 1 小时（≈ 2 万条 Dolci-Instruct，平均约 560 token；或 6–8k 条短思维链）+ GRPO 150 步（约 1–1.25 小时）+ 三次快速评测（Diamond 198 + Main 448 题）。**5 次合计**约 6000 万 SFT token、约 750–1000 GRPO 步。
+**每次实验（4B，`MODE="a100"`）**：SFT 2 万条约 40 分钟；GRPO 100 步（每步 4 题 × 8，回答 ≤6144）约 2–3 小时；快速评测（Diamond 198 + Main 448，≤8192）回答正常结束时约 5–10 分钟。
 **全量 Dolci 不现实**：Instruct 约 215 万条（≈1–1.5B token，4B 要 100+ 小时）；Think 约 190 万条（>10B token）。
 
-**策略**（详见 `results.md` 的 X1–X5）：
-1. 先修好"答完要停"（停止 token + 截断惩罚 + 诊断）。
-2. SFT 数据对准 GPQA：按 `source_dataset` / `domain` 只留科学、数学、逻辑；加 ≤3k token 的短思维链。
-3. SciQ 只用来教格式（约 2000 条）。
-4. GRPO 用更难的题：MMLU-Pro STEM（4 选 1），关注 W&B 里的 `frac_reward_zero_std`（组内奖励全相同的比例，越高学习信号越弱）。
-5. SFT 合并后推到 HF（`PUSH_SFT_REPO`），后面的实验用 `INIT_MODEL` + `RUN_SFT=False` 复用，省额度。
+**流程**（照 OLMo 3，详见 `results.md`）：notebook 11 SFT（`PUSH_SFT_REPO`）→ notebook 12 DPO（Dolci-Instruct-DPO 的 32B vs 0.6B delta 对，`PUSH_REPO`）→ notebook 11 GRPO（`RUN_SFT=False`、`INIT_MODEL`=DPO 模型）。
+借鉴来源：OLMo 3 / open-instruct（结束符、SFT→DPO→RL、clip-higher、去掉无信号的组）、Dr.SCI（4-gram 覆盖度选 SFT 数据、按难度的课程、数值题）、DAPO（软超长惩罚）、Delta Learning（弱对弱的偏好对）。
 
 ## Weights & Biases
 
@@ -101,8 +97,8 @@ notebook 11 会自动记录（写法同 [rlhf-book `policy_gradients/train.py`](
 
 | notebook | 参考的 Unsloth 示例 | 做什么 | A100 时间（估） | 能上榜吗 |
 |---|---|---|---|---|
-| 12 DPO | [Zephyr (7B) DPO](https://github.com/unslothai/notebooks/blob/main/nb/Zephyr_(7B)-DPO.ipynb) | `INIT_MODEL` = 11 的 SFT；每题采样 8 个回答，答对且收尾的当 chosen、答错或没停的当 rejected；`RPO_ALPHA` 加 chosen 上的 NLL；`ROUNDS=2` 迭代 | 1–1.2 小时 | 能（T4 上重跑） |
-| 13 蒸馏 | [Qwen3 (0.6B) Knowledge Distillation](https://github.com/unslothai/notebooks/blob/main/python_scripts/Qwen3_(0.6B)-Knowledge_Distillation.py) | TRL `GKDTrainer` + Unsloth 分块损失；老师 Qwen3-32B 4-bit（OOM 换 14B），学生 4B 16-bit LoRA；默认离线（`lmbda=0`） | 约 2 小时 | **不能**（老师是官方后训练模型） |
+| 12 DPO | [Zephyr (7B) DPO](https://github.com/unslothai/notebooks/blob/main/nb/Zephyr_(7B)-DPO.ipynb) | `INIT_MODEL` = 11 的 SFT；默认 `DPO_DATA="dolci"`：OLMo 3 的 Dolci-Instruct-DPO 里 delta learning 对（Qwen3-32B vs 0.6B），按来源留科学/数学；`"onpolicy"`：自己采样的答对且收尾 vs 答错或没停；`ROUNDS=2` 迭代 | `dolci` 约 40 分钟 | 能（公开数据集；T4 上重跑） |
+| 13 蒸馏 | [Qwen3 (0.6B) Knowledge Distillation](https://github.com/unslothai/notebooks/blob/main/python_scripts/Qwen3_(0.6B)-Knowledge_Distillation.py) | TRL `GKDTrainer` + Unsloth 分块损失；老师 Qwen3-32B 4-bit（官方 GPQA-D 68.4 / 54.6，OOM 换 14B），学生 4B 16-bit LoRA；默认离线（`lmbda=0`），短答案数据 | 约 2 小时 | **不能**（老师是官方后训练模型） |
 | 14 探针 | [Qwen3.5 (4B) Decision](https://github.com/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)-Decision.ipynb) | `FastDecisionModel` 在 MMLU-Pro STEM + SciQ 上训练打分头，对 GPQA 只算准确率 / 分学科准确率；换 `BACKBONE` 对比 base 和 SFT | 约 40 分钟 | 不能（不生成文字） |
 
 注意：

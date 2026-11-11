@@ -36,13 +36,54 @@ LETTER_RE = re.compile(r"\(([A-D])\)")
 LETTERS = "ABCD"
 MMLU_PRO_STEM = ("physics", "chemistry", "biology", "engineering", "math")
 
-# Plain ChatML (what Qwen3 uses). unsloth/Qwen3-*-Base tokenizers ship without a chat template.
-CHATML_TEMPLATE = (
-    "{% for message in messages %}"
-    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
-)
+# Chat templates for Qwen3 *Base* models (their tokenizers ship without one).
+#
+# "olmo" (default) follows OLMo 3 / open-instruct: turns are ChatML, but the final assistant turn ends
+# with the end-of-document token <|endoftext|> instead of <|im_end|>. Qwen3-4B-Base has (almost) never
+# produced <|im_end|>, its output row is undertrained and tied to the input embedding, so LoRA cannot fix
+# it: in run X1 the model learned to emit the glitch token "\tNdrFc" (id 70564) where <|im_end|> should be
+# and then kept writing. <|endoftext|> is what the base model already emits at the end of a document.
+# "plain" follows OLMo's RL-Zero prompts: no special tokens at all, plain-text headers + <|endoftext|>.
+# "chatml" is the old template (assistant turns end with <|im_end|>), kept for comparison only.
+EOT = "<|endoftext|>"
+CHAT_TEMPLATES = {
+    "olmo": (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'assistant' %}"
+        "{{ '<|im_start|>assistant\\n' + message['content'] }}"
+        "{% if loop.last %}{{ '<|endoftext|>' }}{% else %}{{ '<|im_end|>\\n' }}{% endif %}"
+        "{% else %}"
+        "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    ),
+    "plain": (
+        "{% for message in messages %}"
+        "{% if message['role'] == 'assistant' %}"
+        "{{ '### Response:\\n' + message['content'] }}"
+        "{% if loop.last %}{{ '<|endoftext|>' }}{% else %}{{ '\\n\\n' }}{% endif %}"
+        "{% else %}"
+        "{{ '### Question:\\n' + message['content'] + '\\n\\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '### Response:\\n' }}{% endif %}"
+    ),
+    "chatml": (
+        "{% for message in messages %}"
+        "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    ),
+}
+CHATML_TEMPLATE = CHAT_TEMPLATES["chatml"]
+# (instruction_part, response_part) for unsloth.chat_templates.train_on_responses_only
+RESPONSE_PARTS = {
+    "olmo": ("<|im_start|>user\n", "<|im_start|>assistant\n"),
+    "chatml": ("<|im_start|>user\n", "<|im_start|>assistant\n"),
+    "plain": ("### Question:\n", "### Response:\n"),
+}
+GLITCH_TOKEN = "\tNdrFc"   # id 70564 in the Qwen3 vocabulary; what X1 emitted instead of <|im_end|>
 STOP_STRS = ["<|im_end|>", "<|im_start|>", "<|endoftext|>"]
 
 
@@ -184,11 +225,23 @@ def sciq_format_rows(n: int, skip: int = 0) -> list[dict]:
 # ---------------------------------------------------------------- scoring
 
 
+def _has_repeat(text: str, n: int = 8, times: int = 4) -> bool:
+    """Some n-word span occurs at least `times` times (the model is looping)."""
+    words = text.split()
+    if len(words) < n * times:
+        return False
+    counts = Counter(tuple(words[i:i + n]) for i in range(len(words) - n + 1))
+    return max(counts.values()) >= times
+
+
 def score_completion(text: str, gold: str, finish_reason: str | None = None, n_tokens: int | None = None) -> dict:
     """Per-completion score. strict = first 'The answer is (X)' (lm-eval strict-match);
-    flex = last '(X)' anywhere (lm-eval flexible-extract, the leaderboard metric)."""
+    flex = last '(X)' anywhere (lm-eval flexible-extract, the leaderboard metric).
+    Diagnostics: repeat (looping), answer_then_more (>=30% of the text after the first
+    'The answer is (X)'), glitch (the '\\tNdrFc' token run X1 emitted instead of an end token)."""
     strict = STRICT_RE.findall(text)
     found = LETTER_RE.findall(text)
+    m = STRICT_RE.search(text)
     return {
         "strict": bool(strict) and strict[0] == gold,
         "flex": bool(found) and found[-1] == gold,
@@ -196,6 +249,9 @@ def score_completion(text: str, gold: str, finish_reason: str | None = None, n_t
         "truncated": finish_reason == "length",
         "letter": found[-1] if found else "none",
         "n_tokens": n_tokens if n_tokens is not None else len(text.split()),
+        "repeat": _has_repeat(text),
+        "answer_then_more": bool(m) and (len(text) - m.end()) >= 0.3 * len(text),
+        "glitch": "NdrFc" in text,
     }
 
 
@@ -205,7 +261,7 @@ def aggregate(scores: list[dict]) -> dict:
         return {"n": 0}
 
     def pct(key):
-        return round(100 * sum(bool(s[key]) for s in scores) / n, 1)
+        return round(100 * sum(bool(s.get(key)) for s in scores) / n, 1)
 
     return {
         "n": n,
@@ -214,6 +270,9 @@ def aggregate(scores: list[dict]) -> dict:
         "extract_rate": pct("extracted"),
         "truncation_rate": pct("truncated"),
         "mean_tokens": round(statistics.fmean(s["n_tokens"] for s in scores)),
+        "repeat_rate": pct("repeat"),
+        "answer_then_more": pct("answer_then_more"),
+        "glitch_rate": pct("glitch"),
         "letters": dict(sorted(Counter(s["letter"] for s in scores).items())),
     }
 
@@ -227,29 +286,192 @@ def score_vllm_outputs(outputs, golds: list[str]) -> dict:
     return aggregate(scores)
 
 
-def is_correct_and_stopped(text: str, gold: str, finish_reason: str | None) -> bool:
-    s = score_completion(text, gold, finish_reason)
-    return s["flex"] and not s["truncated"]
+# ---------------------------------------------------------------- rewards (GRPO) and answer checking
+
+BOXED_RE = re.compile(r"\\boxed\{")
+_NUM = r"[-+−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|[-+−]?\.\d+"
+_SCI = re.compile(
+    rf"^\s*\$?\s*(?P<num>{_NUM})\s*(?:(?:\\times|×|x|\\cdot)\s*10\s*\^\s*\{{?\s*(?P<exp>[-+−]?\d+)\s*\}}?|[eE](?P<eexp>[-+]?\d+))?"
+    r"\s*(?P<unit>.*?)\s*\$?\s*$"
+)
+
+
+def last_boxed(text: str) -> str | None:
+    """Content of the last \\boxed{...} (balanced braces), or None."""
+    starts = [m.end() for m in BOXED_RE.finditer(text)]
+    if not starts:
+        return None
+    i, depth, out = starts[-1], 1, []
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return "".join(out).strip()
+        out.append(ch)
+        i += 1
+    return None
+
+
+def parse_number(s: str | None) -> float | None:
+    """Parse '8.85 \\times 10^{-8}', '1.2e3', '865.018 m^3', '-3,200 J' -> float. None if the string is
+    not a single number (optionally followed by a unit without digits other than exponents)."""
+    if s is None:
+        return None
+    s = s.strip().replace("−", "-").replace("\\,", "").replace("\\!", "").replace("~", " ")
+    s = re.sub(r"\\(?:text|mathrm|operatorname)\{([^}]*)\}", r" \1", s)
+    m = _SCI.match(s)
+    if not m:
+        return None
+    unit = re.sub(r"\^\{?-?\d+\}?", "", m.group("unit") or "")
+    if re.search(r"\d", unit) or "=" in unit or "\\frac" in unit:
+        return None
+    exp = m.group("exp") or m.group("eexp")
+    num = m.group("num").replace(",", "").replace("−", "-")
+    try:
+        return float(f"{num}e{int(exp.replace('−', '-'))}" if exp is not None else num)
+    except ValueError:
+        return None
+
+
+def numeric_match(pred: float | None, gold: float | None, rel_tol: float = 0.01) -> bool:
+    if pred is None or gold is None:
+        return False
+    if gold == 0:
+        return abs(pred) < 1e-6
+    return abs(pred - gold) <= rel_tol * abs(gold)
+
+
+def correctness_score(text: str, answer: str, answer_type: str = "mcq") -> float:
+    """+2 correct, 0 wrong, -1 no answer found. mcq: last '(X)'; numeric: last \\boxed{} within 1%."""
+    if answer_type == "numeric":
+        boxed = last_boxed(text)
+        if boxed is None:
+            return -1.0
+        return 2.0 if numeric_match(parse_number(boxed), parse_number(answer)) else 0.0
+    found = LETTER_RE.findall(text)
+    if not found:
+        return -1.0
+    return 2.0 if found[-1] == answer else 0.0
+
+
+def format_score(text: str, answer_type: str = "mcq", weight: float = 0.5) -> float:
+    """`weight` if the answer is stated exactly once in the expected form."""
+    if answer_type == "numeric":
+        return weight if len(BOXED_RE.findall(text)) == 1 else 0.0
+    return weight if len(STRICT_RE.findall(text)) == 1 else 0.0
+
+
+def soft_overlong_penalty(n_tokens: int, max_len: int, cache: int = 1024) -> float:
+    """DAPO's soft overlong punishment: 0 up to max_len - cache, then linear down to -1 at max_len."""
+    if n_tokens >= max_len:
+        return -1.0
+    start = max_len - cache
+    if n_tokens <= start:
+        return 0.0
+    return -(n_tokens - start) / cache
+
+
+def is_correct(text: str, answer: str, answer_type: str = "mcq") -> bool:
+    return correctness_score(text, answer, answer_type) > 0
+
+
+# ---------------------------------------------------------------- Dr.SCI (RL questions with reference answers)
+
+DRSCI_SUBJECTS = ("physics", "chemistry", "biology")
+
+
+def drsci_numeric_row(row: dict, subjects=DRSCI_SUBJECTS, difficulty=(0.25, 0.875)) -> dict | None:
+    """MiniByte-666/Dr.SCI verifiable row -> GRPO row with a numeric answer, or None.
+
+    difficulty = Qwen3-32B pass rate over 8 tries (larger = easier); keep lo <= d <= hi.
+    The row's own prompt already asks for 'The final answer is: $\\boxed{ANSWER}$'.
+    """
+    info = row.get("extra_info") or {}
+    if not info.get("match_rule"):
+        return None
+    if subjects and info.get("subject") not in subjects:
+        return None
+    d = info.get("difficulty")
+    if d is None or not (difficulty[0] <= d <= difficulty[1]):
+        return None
+    ref = info.get("reference_answer") or (row.get("reward_model") or {}).get("ground_truth")
+    if parse_number(ref) is None:
+        return None
+    prompt = row.get("prompt") or []
+    content = prompt[0]["content"] if prompt and isinstance(prompt[0], dict) else info.get("question")
+    if not content:
+        return None
+    return {"prompt": [{"role": "user", "content": content}], "answer": str(ref), "answer_type": "numeric",
+            "difficulty": d, "source": f"drsci/{info.get('subject')}"}
+
+
+# ---------------------------------------------------------------- Dolci DPO (OLMo 3 preference data)
+
+
+def dolci_dpo_pair(ex: dict, include=(), exclude=(), types=None) -> dict | None:
+    """allenai/Dolci-Instruct-DPO or Dolci-Think-DPO-7B row -> {"prompt","chosen","rejected", ...} or None.
+
+    The source of an Instruct-DPO row is only in `prompt_id` (e.g. 'OpenThoughts3-full-filtered-science-
+    no-cot-request-99-738'); Think-DPO has `dataset_source`. `types` filters `preference_type`
+    (e.g. ["delta_learning"]: chosen from Qwen3-32B, rejected from Qwen3-0.6B).
+    """
+    sys.path.insert(0, str(SCRIPTS))
+    from prepare_dolci_sft import filter_key, get_messages, keep_source
+
+    if types and ex.get("preference_type") not in types:
+        return None
+    key = filter_key(ex)
+    if not keep_source(key, list(include), list(exclude)):
+        return None
+    ch, rj = get_messages({"messages": ex.get("chosen")}), get_messages({"messages": ex.get("rejected")})
+    if not ch or not rj or ch[-1]["role"] != "assistant" or rj[-1]["role"] != "assistant":
+        return None
+    prompt = ch[:-1]
+    if not any(m["role"] == "user" for m in prompt) and isinstance(ex.get("prompt"), str):
+        prompt = [{"role": "user", "content": ex["prompt"]}]
+    if not any(m["role"] == "user" for m in prompt):
+        return None
+    return {"prompt": prompt, "chosen": [ch[-1]], "rejected": [rj[-1]], "source": key,
+            "chosen_model": ex.get("chosen_model"), "rejected_model": ex.get("rejected_model")}
+
+
+def is_correct_and_stopped(text: str, gold: str, finish_reason: str | None, answer_type: str = "mcq") -> bool:
+    return is_correct(text, gold, answer_type) and finish_reason != "length"
 
 
 # ---------------------------------------------------------------- tokenizer / config helpers
 
 
-def setup_chatml_stop(tokenizer, model=None) -> list[int]:
-    """Make a Qwen3 *Base* tokenizer stop after one ChatML turn (runs 1-2 never stopped).
+def setup_chat(tokenizer, model=None, style: str = "olmo", force: bool = True) -> list[int]:
+    """Install a chat template on a Qwen3 Base tokenizer and return the token ids sampling should stop on.
 
-    Adds the ChatML template if missing, sets eos to <|im_end|>, pad to <|endoftext|>, and returns the
-    token ids sampling should stop on: <|im_end|>, <|endoftext|>, <|im_start|> (start of a new turn).
+    style "olmo"/"plain": eos = <|endoftext|> (what the final assistant turn is trained to end with);
+    style "chatml": eos = <|im_end|> (old behaviour). generation_config.eos_token_id gets both end tokens
+    (as OLMo 3 ships), so vLLM / lm-eval stop on either. Stop ids also include <|im_start|> and the glitch
+    token "\tNdrFc" as a safety net. force=False keeps a template the tokenizer already has (e.g. a merged
+    model saved by these notebooks).
     """
-    if not getattr(tokenizer, "chat_template", None):
-        tokenizer.chat_template = CHATML_TEMPLATE
-    ids = [tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>", "<|im_start|>")]
-    tokenizer.eos_token = "<|im_end|>"
+    if force or not getattr(tokenizer, "chat_template", None):
+        tokenizer.chat_template = CHAT_TEMPLATES[style]
+    im_end, eot, im_start = (tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", EOT, "<|im_start|>"))
+    tokenizer.eos_token = "<|im_end|>" if style == "chatml" else EOT
     if tokenizer.pad_token is None or tokenizer.pad_token == tokenizer.eos_token:
-        tokenizer.pad_token = "<|endoftext|>"
+        tokenizer.pad_token = "<|vision_pad|>" if "<|vision_pad|>" in tokenizer.get_vocab() else "<|fim_pad|>"
     if model is not None and getattr(model, "generation_config", None) is not None:
-        model.generation_config.eos_token_id = ids[:2]
+        model.generation_config.eos_token_id = [tokenizer.eos_token_id, im_end if style != "chatml" else eot]
+    ids = [eot, im_end, im_start]
+    glitch = tokenizer.convert_tokens_to_ids("ĉNdrFc")
+    if isinstance(glitch, int) and glitch != getattr(tokenizer, "unk_token_id", None) and glitch >= 0:
+        ids.append(glitch)
     return ids
+
+
+def setup_chatml_stop(tokenizer, model=None) -> list[int]:
+    """Old behaviour (assistant turns end with <|im_end|>); kept for comparison."""
+    return setup_chat(tokenizer, model, style="chatml", force=not getattr(tokenizer, "chat_template", None))
 
 
 def chat_prompt(tokenizer, prompt: str) -> str:

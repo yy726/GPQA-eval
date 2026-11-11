@@ -31,7 +31,7 @@ from collections import Counter
 from pathlib import Path
 
 DEFAULT_DATASET = "allenai/Dolci-Think-SFT-7B"
-SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset")
+SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset", "prompt_id")
 DOMAIN_KEYS = ("domain", "category", "task_type", "subject", "discipline")
 
 # Plain ChatML (the format Qwen3 uses). Some *-Base tokenizers ship without a chat template;

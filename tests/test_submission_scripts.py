@@ -104,3 +104,9 @@ def test_question_answer_columns_become_chat():
                                            "messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "v"}]})
     assert msgs[0]["content"] == "u"
     assert prepare_dolci_sft.get_messages({"question": "q"}) is None
+
+
+def test_prompt_id_is_a_source_key():
+    ex = {"prompt_id": "tulu-3-sft-personas-math-request-104-916", "chosen": [], "rejected": []}
+    assert "personas-math" in prepare_dolci_sft.filter_key(ex)
+    assert prepare_dolci_sft.keep_source(prepare_dolci_sft.filter_key(ex), ["math"], ["code"])
