@@ -19,7 +19,9 @@
 #   .gitignore). Only the aggregated submission JSON is meant to be shared.
 # * Chat template: the model's own default template is used (`--apply_chat_template`). For the
 #   official Qwen/Qwen3-4B reference this means thinking mode is ON by default; with the locked
-#   4096-token budget some long thoughts get cut off. That is intended: everyone gets the same budget.
+#   8192-token budget some long thoughts still get cut off. That is intended: everyone gets the same budget.
+# * Budget history: max_gen_toks was 4096 until 2026-11-11 and is 8192 since (more room for
+#   step-by-step reasoning). Scores from the two budgets are not comparable.
 # * Only the vLLM sampling seed changes between runs. lm-eval's own `--seed` (which controls
 #   the answer-choice shuffle in the GPQA task) stays fixed at 0, so every team sees the same
 #   prompts in the same order.
@@ -32,8 +34,8 @@ BACKEND="${4:-${BACKEND:-vllm}}"
 
 # ---- Locked settings (do not change for leaderboard submissions) ----
 TASKS="gpqa_diamond_cot_zeroshot,gpqa_main_cot_zeroshot"
-MAX_MODEL_LEN=8192
-MAX_GEN_TOKS=4096
+MAX_GEN_TOKS=8192
+MAX_MODEL_LEN=12288     # longest GPQA prompt (~2.8k tokens) + MAX_GEN_TOKS
 TEMPERATURE=0.6
 TOP_P=0.95
 DTYPE=float16           # T4 (sm75) has no native bf16

@@ -29,7 +29,8 @@
 - 只认 `notebooks/01_eval_gpqa.ipynb` 或 `scripts/eval_gpqa.sh` 产出的分数，**不得修改评测参数**。
 - 主指标：`gpqa_diamond_cot_zeroshot` 的 `exact_match,flexible-extract`，4 个 seed 的均值。第二指标：`gpqa_main_cot_zeroshot`。
 - 可以修改模型自带的 chat template（例如改格式），但**不得**在模板里加入 few-shot 例子、领域知识或任何与题目相关的内容。助教复评时会检查。
-- 模型生成预算固定为 4096 token；思维链太长会被截断，这本身就是要优化的一部分。
+- 模型生成预算固定为 **8192 token**（`max_model_len=12288`）；思维链太长会被截断，这本身就是要优化的一部分。
+  - 2026-11-11 起从 4096 放宽到 8192，给分步推理更多空间。之前在 4096 下跑出的分数不能和 8192 的直接比较，请用新脚本重新评测。
 
 ## 5. GPQA 使用条款 / GPQA terms
 
