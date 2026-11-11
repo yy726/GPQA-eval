@@ -92,3 +92,15 @@ def test_filter_key_uses_source_and_domain():
     assert not prepare_dolci_sft.keep_source(prepare_dolci_sft.filter_key(code_row), ["science", "math"], ["python"])
     # no domain column: falls back to the source name only
     assert prepare_dolci_sft.filter_key({"source": "Tulu 3 Persona MATH"}) == "Tulu 3 Persona MATH"
+
+
+def test_question_answer_columns_become_chat():
+    msgs = prepare_dolci_sft.get_messages({"question": "Why is the sky blue?", "answer": "Rayleigh scattering.",
+                                           "subject": "physics"})
+    assert msgs == [{"role": "user", "content": "Why is the sky blue?"},
+                    {"role": "assistant", "content": "Rayleigh scattering."}]
+    # a chat column wins over question/answer columns
+    msgs = prepare_dolci_sft.get_messages({"question": "q", "answer": "a",
+                                           "messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "v"}]})
+    assert msgs[0]["content"] == "u"
+    assert prepare_dolci_sft.get_messages({"question": "q"}) is None

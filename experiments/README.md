@@ -6,6 +6,11 @@
 | 文件 | 作用 |
 |---|---|
 | `notebooks/11_sft_grpo_unsloth.ipynb` | **主力 notebook**：照 Unsloth 官方 Qwen3 Instruct / GRPO notebook 的写法，SFT（Dolci 按科学/数学过滤 + 可选短思维链 + 选择题格式）→ GRPO（SciQ 或 MMLU-Pro STEM，可验证奖励 + 截断惩罚），base / SFT / GRPO 各做一次 GPQA 快速评测，W&B 记录。模式 `quick` / `medium` / `a100` |
+| `notebooks/12_dpo_unsloth.ipynb` | **DPO**：从 11 的 SFT 模型出发，默认用"自己采样的回答"组成偏好对（答对且收尾 vs 答错或没停），也可用 Dolci DPO；可迭代 |
+| `notebooks/13_distill_gkd.ipynb` | **知识蒸馏（GKD）**：Qwen3-32B（4-bit）→ Qwen3-4B-Base，离线对齐老师的逐 token 分布。**只作参考，不参与排名** |
+| `notebooks/14_decision_probe.ipynb` | **Decision 知识探针**：加打分头直接选选项（不生成文字），测 4B 不写思维链"知道"多少。只做分析，不能提交 |
+| `scripts/recipe_utils.py` / `scripts/quick_eval.py` | 12–14 共用：题面、答案提取、快速评测（与 11 同口径）、去污染、多数据源抽样 |
+| `experiments/DATASETS.md` | 可能对 GPQA 有用的数据集（MegaScience、Dr.SCI、OpenThoughts3…）和用法 |
 | `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
 | `notebooks/03_grpo_mcq_lora.ipynb` | 进阶：选择题 GRPO |
@@ -88,3 +93,20 @@ notebook 11 会自动记录（写法同 [rlhf-book `policy_gradients/train.py`](
 2. 可选：在配置格改 `WANDB_PROJECT`（默认 `gpqa-hackathon`）/ `WANDB_ENTITY`；`EXP_NAME` 决定 run 名（`X1-Qwen3-4B-Base-a100`）。
 3. 记录内容：SFT 和 GRPO 的训练曲线（loss、各项奖励、回答长度、`frac_reward_zero_std`…）、每个阶段的 GPQA 快速评测（`gpqa/<set>/<stage>/*` 在 run summary 里，外加一张汇总表）、报告 JSON（artifact）、全部配置。
 4. **不会**上传 GPQA 题目或模型生成内容（`log_completions=False`）。
+
+## 更多配方（notebook 12–14）
+
+都照 Unsloth 官方 notebook 的写法，配置格有 `quick`（0.6B / T4 验证流程）和 `a100` 两档；W&B、快速评测和报告 JSON 的格式同 notebook 11。
+都还没在 GPU 上跑过：**先用 `MODE="quick"` 跑一遍**确认流程，再上 A100。
+
+| notebook | 参考的 Unsloth 示例 | 做什么 | A100 时间（估） | 能上榜吗 |
+|---|---|---|---|---|
+| 12 DPO | [Zephyr (7B) DPO](https://github.com/unslothai/notebooks/blob/main/nb/Zephyr_(7B)-DPO.ipynb) | `INIT_MODEL` = 11 的 SFT；每题采样 8 个回答，答对且收尾的当 chosen、答错或没停的当 rejected；`RPO_ALPHA` 加 chosen 上的 NLL；`ROUNDS=2` 迭代 | 1–1.2 小时 | 能（T4 上重跑） |
+| 13 蒸馏 | [Qwen3 (0.6B) Knowledge Distillation](https://github.com/unslothai/notebooks/blob/main/python_scripts/Qwen3_(0.6B)-Knowledge_Distillation.py) | TRL `GKDTrainer` + Unsloth 分块损失；老师 Qwen3-32B 4-bit（OOM 换 14B），学生 4B 16-bit LoRA；默认离线（`lmbda=0`） | 约 2 小时 | **不能**（老师是官方后训练模型） |
+| 14 探针 | [Qwen3.5 (4B) Decision](https://github.com/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)-Decision.ipynb) | `FastDecisionModel` 在 MMLU-Pro STEM + SciQ 上训练打分头，对 GPQA 只算准确率 / 分学科准确率；换 `BACKBONE` 对比 base 和 SFT | 约 40 分钟 | 不能（不生成文字） |
+
+注意：
+- 12 依赖 11 推到 HF 的 SFT 模型（11 里设 `PUSH_SFT_REPO`）。
+- 13 安装时把 TRL 固定到 0.25.1（Unsloth 蒸馏示例测过的版本）；如果开头的"分块损失已接上"检查失败，Runtime → Restart session 后重跑。
+- 13 和 14 的 GPQA 评测在独立进程里跑（`scripts/quick_eval.py` / 本地 `evaluate`），只输出聚合数字。
+

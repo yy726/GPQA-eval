@@ -10,6 +10,9 @@ The Dolci datasets are large (~2M rows), so we stream them and stop once enough 
 the filters. Column names are detected at runtime (`messages`/`conversations`, and a source
 column among `source`/`dataset_source`/`dataset`), because they can change between releases.
 
+Also works for other chat-style or question/answer datasets (OpenThoughts3, Mixture-of-Thoughts,
+MegaScience, ...): see experiments/DATASETS.md.
+
 Usage:
     python scripts/prepare_dolci_sft.py --out data/sft.jsonl --n 5000 \
         --tokenizer unsloth/Qwen3-0.6B-Base-unsloth-bnb-4bit --max-tokens 4096 \
@@ -29,7 +32,7 @@ from pathlib import Path
 
 DEFAULT_DATASET = "allenai/Dolci-Think-SFT-7B"
 SOURCE_KEYS = ("source", "dataset_source", "source_dataset", "dataset", "dataset_name", "origin", "subset")
-DOMAIN_KEYS = ("domain", "category", "task_type")
+DOMAIN_KEYS = ("domain", "category", "task_type", "subject", "discipline")
 
 # Plain ChatML (the format Qwen3 uses). Some *-Base tokenizers ship without a chat template;
 # we fall back to this so token counts match what training / evaluation will see.
@@ -54,9 +57,17 @@ def count_chat_tokens(tok, msgs: list[dict]) -> int:
         ids = ids["input_ids"]
     return len(ids)
 MSG_KEYS = ("messages", "conversations")
+# Datasets without a chat column (e.g. MegaScience, NaturalReasoning, SCP-116K) keep question and
+# answer in separate string columns; the first present pair is turned into a two-turn chat.
+QUESTION_KEYS = ("question", "problem", "prompt", "instruction", "query")
+ANSWER_KEYS = ("response", "answer", "solution", "output", "generation", "completion", "reference_answer")
 
 
 def get_messages(ex: dict) -> list[dict] | None:
+    q = next((ex[k] for k in QUESTION_KEYS if isinstance(ex.get(k), str) and ex[k].strip()), None)
+    a = next((ex[k] for k in ANSWER_KEYS if isinstance(ex.get(k), str) and ex[k].strip()), None)
+    if not any(isinstance(ex.get(k), list) and ex[k] for k in MSG_KEYS) and q and a:
+        return [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
     for k in MSG_KEYS:
         msgs = ex.get(k)
         if isinstance(msgs, list) and msgs:
@@ -120,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", default=DEFAULT_DATASET)
     p.add_argument("--split", default="train")
+    p.add_argument("--config", default=None, help="Dataset config / subset name (e.g. 'science' for open-r1/Mixture-of-Thoughts)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--n", type=int, default=5000, help="Number of examples to keep")
     p.add_argument("--max-tokens", type=int, default=4096, help="Drop examples longer than this")
@@ -140,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from datasets import load_dataset
 
-    ds = load_dataset(args.dataset, split=args.split, streaming=True)
+    ds = load_dataset(args.dataset, args.config, split=args.split, streaming=True)
 
     if args.list_sources:
         c = Counter(filter_key(ex) for _, ex in zip(range(args.list_sources), ds))
