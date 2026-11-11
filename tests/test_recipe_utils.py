@@ -7,6 +7,8 @@ import random
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -259,3 +261,105 @@ def test_select_coverage_greedy():
     assert sc.select([long_text, short_new], 1, norm="none") == [0]
     assert sc.select([long_text, short_new], 1, norm="len") == [1]
     assert sc.covered_ngrams(["a b c d e"]) == 2
+
+
+# ---------------------------------------------------------------- avg@k eval, paired comparison, GRPO diagnostics
+
+
+def _out(*texts, finish="stop", n_tokens=10):
+    """Fake vLLM RequestOutput with one completion per text."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(outputs=[SimpleNamespace(text=t, finish_reason=finish, token_ids=[0] * n_tokens) for t in texts])
+
+
+def test_score_vllm_outputs_averages_all_samples():
+    outs = [_out("The answer is (A).", "The answer is (B)."), _out("The answer is (C).", "The answer is (C).")]
+    agg, per_q = ru.score_vllm_outputs(outs, ["A", "C"], detail=True)
+    assert per_q == [0.5, 1.0]
+    assert agg["n"] == 2 and agg["samples"] == 2
+    assert agg["acc_flex"] == 75.0                    # 3 of 4 samples
+    assert agg["acc_flex_se"] == 17.7                 # pstdev([0.5, 1.0]) / sqrt(2) = 0.1768
+    assert ru.score_vllm_outputs(outs, ["A", "C"])["acc_flex"] == 75.0
+
+
+def test_paired_delta():
+    d = ru.paired_delta([0.0, 0.5, 1.0, 0.5], [0.5, 0.5, 1.0, 1.0])
+    assert d["delta"] == 25.0 and d["n"] == 4
+    assert d["se"] == 14.4 and d["z"] == 1.73          # stdev([.5,0,0,.5]) / 2 = 0.1443
+    assert ru.paired_delta([0.5, 0.5], [0.5, 0.5])["z"] == 0.0
+    assert ru.paired_delta([1.0], [0.0]) == {}
+
+
+def test_quick_eval_runs_compares_and_splits_main(capsys):
+    sets = {
+        "gpqa_diamond": [("p1", "A", "k1"), ("p2", "B", "k2")],
+        "gpqa_main": [("p1m", "A", "k1"), ("p2m", "B", "k2"), ("p3m", "C", "k3"), ("p4m", "D", "k4")],
+    }
+    ev = ru.QuickEval(sets, max_tokens=64, samples=2, stop_ids=[1])
+    seen = []
+
+    def gen(answers):
+        def generate(texts, kw):
+            seen.append(kw)
+            return [_out(*[f"The answer is ({a})."] * kw["n"]) for a in answers[: len(texts)]]
+        return generate
+
+    ev.run("1_sft", gen(["A", "B", "A", "A"]))        # main: 2 of 4 right (both Diamond questions)
+    ev.run("2_grpo", gen(["A", "A", "C", "D"]))       # main: 3 of 4 right (one Diamond question, both others)
+    assert seen[0]["n"] == 2 and seen[0]["max_tokens"] == 64 and seen[0]["stop_token_ids"] == [1]
+    main = ev.results["1_sft"]["gpqa_main"]
+    assert main["acc_flex"] == 50.0 and main["acc_flex_diamond_part"] == 100.0 and main["acc_flex_rest"] == 0.0
+    assert ev.results["2_grpo"]["gpqa_main"]["acc_flex_diamond_part"] == 50.0
+    assert "acc_flex_diamond_part" not in ev.results["1_sft"]["gpqa_diamond"]
+    cmp = ev.compare_all()["1_sft -> 2_grpo"]
+    assert cmp["gpqa_diamond"]["delta"] == -50.0 and cmp["gpqa_main"]["delta"] == 25.0
+    out = capsys.readouterr().out
+    assert "p1" not in out.replace("pass", "") and "The answer is" not in out   # aggregates only
+
+
+def test_quick_eval_sample_override():
+    ev = ru.QuickEval({"gpqa_diamond": [("p", "A", "k")]}, max_tokens=8, samples=4)
+    assert ev.sampling_kwargs()["n"] == 4 and ev.sampling_kwargs(1)["n"] == 1
+
+
+def test_pass_stats_by_type_and_zero_std():
+    rows = [{"answer": "A", "answer_type": "mcq"}, {"answer": "B", "answer_type": "mcq"},
+            {"answer": "2.5", "answer_type": "numeric"}]
+    outs = [
+        _out("(A)", "(A)", "(B)", "(A)"),                                           # 3 of 4
+        _out("(A)", "(C)", "(D)", "(A)"),                                           # 0 of 4: no signal
+        _out("\\boxed{2.5}", "\\boxed{2.51}", "\\boxed{3}", "no answer", n_tokens=40),  # 2 of 4
+    ]
+    outs[0].outputs[0].finish_reason = "length"       # right letter but cut off: not counted
+    st = ru.pass_stats(outs, rows)
+    assert st["correct_counts"] == [2, 0, 2]
+    assert st["pass_by_type"] == {"mcq": 25.0, "numeric": 50.0} and st["pass_rate"] == 33.3
+    assert st["hist"] == {0: 1, 2: 2} and st["zero_std"] == 33.3
+    assert st["stop_rate"] == 91.7 and len(st["stopped_lengths"]) == 11
+
+
+def test_suggest_completion_cap():
+    lengths = [300] * 98 + [900, 1100]
+    assert ru.suggest_completion_cap(lengths, 6144) == 2304          # 2 x p99 (1100) = 2200 -> next multiple of 256
+    assert ru.suggest_completion_cap([100] * 50, 6144) == 1024        # floor
+    assert ru.suggest_completion_cap([4000] * 50, 6144) == 6144       # preset cap
+    assert ru.suggest_completion_cap([], 6144) == 6144                # nothing measured
+    assert ru.suggest_completion_cap([100] * 50, 512) == 512          # floor never exceeds the preset
+
+
+def test_question_key_ignores_case_and_spacing():
+    assert ru.question_key("What  is\nX?") == ru.question_key("what is x?")
+    assert ru.question_key("What is X?") != ru.question_key("What is Y?")
+
+
+def test_lora_delta(tmp_path):
+    torch = pytest.importorskip("torch")
+    st = pytest.importorskip("safetensors.torch")
+    a = {"l.lora_A.weight": torch.ones(2, 2), "l.lora_B.weight": torch.zeros(2, 2)}
+    b = {"l.lora_A.weight": torch.ones(2, 2), "l.lora_B.weight": torch.full((2, 2), 0.5)}
+    for name, sd in (("a", a), ("b", b)):
+        (tmp_path / name).mkdir()
+        st.save_file(sd, str(tmp_path / name / "adapter_model.safetensors"))
+    d = ru.lora_delta(str(tmp_path / "a"), str(tmp_path / "b"))
+    assert d["rel_change"] == 0.5 and d["max_abs_change"] == 0.5     # ||b-a|| = 1, ||a|| = 2

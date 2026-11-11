@@ -14,7 +14,9 @@ Usage in a notebook (after `%cd GPQA-eval`):
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -142,16 +144,27 @@ def gpqa_choices(d: dict, i: int) -> tuple[str, list[str], str]:
     return clean(d["Question"]), choices, letter
 
 
-def build_gpqa(config: str, n: int | None = None) -> list[tuple[str, str]]:
-    """[(prompt, gold letter)] for a GPQA config (gpqa_diamond / gpqa_main). Gated: needs HF login."""
+def question_key(question: str) -> str:
+    """Stable id of a question (hash of its normalised text). Used only in memory, to tell which
+    gpqa_main questions are also in gpqa_diamond; never printed or logged."""
+    return hashlib.sha1(" ".join(clean(question).lower().split()).encode()).hexdigest()[:16]
+
+
+def build_gpqa_keyed(config: str, n: int | None = None) -> list[tuple[str, str, str]]:
+    """[(prompt, gold letter, question key)] for a GPQA config (gpqa_diamond / gpqa_main). Gated: needs HF login."""
     from datasets import load_dataset
 
     ds = load_dataset("Idavidrein/gpqa", config, split="train")
     rows = []
     for i, d in enumerate(ds):
         q, choices, letter = gpqa_choices(d, i)
-        rows.append((format_mcq(q, choices), letter))
+        rows.append((format_mcq(q, choices), letter, question_key(q)))
     return rows[:n] if n else rows
+
+
+def build_gpqa(config: str, n: int | None = None) -> list[tuple[str, str]]:
+    """[(prompt, gold letter)] for a GPQA config (gpqa_diamond / gpqa_main). Gated: needs HF login."""
+    return [(p, g) for p, g, _ in build_gpqa_keyed(config, n)]
 
 
 def load_mcq_items(source: str, n: int, skip: int = 0) -> list[dict]:
@@ -277,13 +290,115 @@ def aggregate(scores: list[dict]) -> dict:
     }
 
 
-def score_vllm_outputs(outputs, golds: list[str]) -> dict:
-    """Aggregate a list of vLLM RequestOutput against gold letters."""
-    scores = []
+def score_vllm_outputs(outputs, golds: list[str], detail: bool = False):
+    """Aggregate a list of vLLM RequestOutput against gold letters.
+
+    Every sample of every prompt is scored (SamplingParams(n=k) gives k per prompt), so acc_flex is avg@k.
+    Extra keys: n = questions, samples = k, acc_flex_se = standard error of acc_flex over questions
+    (percentage points). detail=True also returns the per-question fraction correct (kept in memory only).
+    """
+    scores, per_q = [], []
     for o, gold in zip(outputs, golds):
-        c = o.outputs[0]
-        scores.append(score_completion(c.text, gold, c.finish_reason, len(c.token_ids)))
-    return aggregate(scores)
+        s = [score_completion(c.text, gold, c.finish_reason, len(c.token_ids)) for c in o.outputs]
+        scores.extend(s)
+        per_q.append(sum(x["flex"] for x in s) / max(1, len(s)))
+    agg = aggregate(scores)
+    agg["n"] = len(per_q)
+    agg["samples"] = max((len(o.outputs) for o in outputs), default=0)
+    agg["acc_flex_se"] = round(100 * statistics.pstdev(per_q) / math.sqrt(len(per_q)), 1) if len(per_q) > 1 else None
+    return (agg, per_q) if detail else agg
+
+
+def paired_delta(a: list[float], b: list[float]) -> dict:
+    """b - a on the same questions (per-question fraction correct): mean difference and its standard error,
+    both in percentage points. |z| < 2 means the two stages cannot be told apart."""
+    if len(a) != len(b) or len(a) < 2:
+        return {}
+    d = [y - x for x, y in zip(a, b)]
+    se = statistics.stdev(d) / math.sqrt(len(d))
+    delta = statistics.fmean(d)
+    return {"delta": round(100 * delta, 1), "se": round(100 * se, 1), "z": round(delta / se, 2) if se > 0 else 0.0,
+            "n": len(d)}
+
+
+class QuickEval:
+    """GPQA quick eval shared by notebooks 11 / 12 and scripts/quick_eval.py (aggregate numbers only).
+
+    sets = {config: [(prompt text with chat template, gold letter, question key)]}.
+    run(tag, generate, samples) calls generate(texts, sampling_kwargs) -> vLLM outputs, where sampling_kwargs
+    is a dict for vllm.SamplingParams (n = samples). One sample per question is noisy: on the 198 Diamond
+    questions the difference between two stages has a standard error of about 4 points, so use samples >= 4
+    and read compare() (paired difference +- SE) instead of comparing two single numbers.
+    gpqa_main contains every gpqa_diamond question, so gpqa_main also reports the accuracy on that subset
+    (acc_flex_diamond_part) and on the rest (acc_flex_rest).
+    """
+
+    def __init__(self, sets: dict, max_tokens: int, samples: int = 1, stop_ids=(), stop=tuple(STOP_STRS),
+                 temperature: float = 0.6, top_p: float = 0.95, seed: int = 0):
+        self.sets = sets
+        self.max_tokens, self.samples = max_tokens, samples
+        self.stop_ids, self.stop = list(stop_ids), list(stop)
+        self.temperature, self.top_p, self.seed = temperature, top_p, seed
+        self.results: dict = {}
+        self.per_question: dict = {}
+        self.comparisons: dict = {}
+
+    @classmethod
+    def from_gpqa(cls, tokenizer, configs, eval_n=None, max_tokens: int = 8192, max_model_len: int | None = None, **kw):
+        sets, longest = {}, 0
+        for cfg in configs:
+            rows = [(chat_prompt(tokenizer, p), g, k) for p, g, k in build_gpqa_keyed(cfg, eval_n)]
+            longest = max([longest] + [len(tokenizer(t, add_special_tokens=False)["input_ids"]) for t, _, _ in rows])
+            sets[cfg] = rows
+        if max_model_len is not None and max_tokens > max_model_len - longest - 8:
+            max_tokens = max_model_len - longest - 8
+            print(f"[!] eval max_tokens clamped to {max_tokens} to fit max_model_len={max_model_len}")
+        return cls(sets, max_tokens, **kw)
+
+    def sampling_kwargs(self, samples: int | None = None) -> dict:
+        return dict(n=samples or self.samples, temperature=self.temperature, top_p=self.top_p,
+                    max_tokens=self.max_tokens, seed=self.seed, stop_token_ids=self.stop_ids, stop=self.stop)
+
+    def run(self, tag: str, generate, samples: int | None = None) -> dict:
+        import time
+
+        self.results[tag], self.per_question[tag] = {}, {}
+        for cfg, rows in self.sets.items():
+            t0 = time.time()
+            outs = generate([t for t, _, _ in rows], self.sampling_kwargs(samples))
+            r, per_q = score_vllm_outputs(outs, [g for _, g, _ in rows], detail=True)
+            if cfg == "gpqa_main" and "gpqa_diamond" in self.sets:
+                sub = {k for _, _, k in self.sets["gpqa_diamond"]}
+                inside = [x for x, (_, _, k) in zip(per_q, rows) if k in sub]
+                rest = [x for x, (_, _, k) in zip(per_q, rows) if k not in sub]
+                if inside and rest:
+                    r["acc_flex_diamond_part"] = round(100 * statistics.fmean(inside), 1)
+                    r["acc_flex_rest"] = round(100 * statistics.fmean(rest), 1)
+                    r["n_diamond_part"] = len(inside)
+            r["minutes"] = round((time.time() - t0) / 60, 1)
+            self.results[tag][cfg] = r
+            self.per_question[tag][cfg] = per_q
+            print(tag, cfg, r)
+        return self.results[tag]
+
+    def compare(self, tag_a: str, tag_b: str) -> dict:
+        """Paired difference tag_b - tag_a per config (percentage points)."""
+        out = {}
+        for cfg in self.sets:
+            a, b = self.per_question.get(tag_a, {}).get(cfg), self.per_question.get(tag_b, {}).get(cfg)
+            if a and b:
+                out[cfg] = paired_delta(a, b)
+        self.comparisons[f"{tag_a} -> {tag_b}"] = out
+        for cfg, d in out.items():
+            verdict = "不显著（|z|<2，看不出差别）" if abs(d.get("z", 0)) < 2 else "显著"
+            print(f"{tag_a} -> {tag_b} {cfg}: {d.get('delta'):+.1f} ± {d.get('se')} 分 (z={d.get('z')}, {verdict})")
+        return out
+
+    def compare_all(self) -> dict:
+        tags = list(self.results)
+        for a, b in zip(tags, tags[1:]):
+            self.compare(a, b)
+        return self.comparisons
 
 
 # ---------------------------------------------------------------- rewards (GRPO) and answer checking
@@ -442,6 +557,84 @@ def is_correct_and_stopped(text: str, gold: str, finish_reason: str | None, answ
     return is_correct(text, gold, answer_type) and finish_reason != "length"
 
 
+def pass_stats(outputs, rows: list[dict]) -> dict:
+    """Pass rates of sampled answers on RL-style rows ({"answer", "answer_type"}): overall and per answer type.
+
+    correct = right answer and not cut off. hist = number of prompts with c of k samples correct;
+    zero_std = share of prompts where all k samples agree (all right or all wrong: no GRPO signal).
+    stopped_lengths (token counts of finished answers) is returned for suggest_completion_cap.
+    """
+    by_type: dict = {}
+    hist: Counter = Counter()
+    correct_counts, stopped, n_samples, n_stopped = [], [], 0, 0
+    for r, o in zip(rows, outputs):
+        c = sum(is_correct_and_stopped(x.text, r["answer"], x.finish_reason, r["answer_type"]) for x in o.outputs)
+        k = len(o.outputs)
+        correct_counts.append(c)
+        hist[c] += 1
+        t = by_type.setdefault(r["answer_type"], [0, 0])
+        t[0] += c
+        t[1] += k
+        n_samples += k
+        for x in o.outputs:
+            if x.finish_reason != "length":
+                n_stopped += 1
+                stopped.append(len(x.token_ids))
+    total = sum(v[1] for v in by_type.values())
+    k = max((len(o.outputs) for o in outputs), default=0)
+    return {
+        "prompts": len(correct_counts), "samples": k,
+        "pass_rate": round(100 * sum(v[0] for v in by_type.values()) / total, 1) if total else None,
+        "pass_by_type": {t: round(100 * v[0] / v[1], 1) for t, v in sorted(by_type.items()) if v[1]},
+        "zero_std": round(100 * (hist[0] + hist[k]) / len(correct_counts), 1) if correct_counts and k else None,
+        "stop_rate": round(100 * n_stopped / n_samples, 1) if n_samples else None,
+        "mean_stopped_tokens": round(statistics.fmean(stopped)) if stopped else None,
+        "hist": dict(sorted(hist.items())),
+        "correct_counts": correct_counts,
+        "stopped_lengths": stopped,
+    }
+
+
+def suggest_completion_cap(stopped_lengths: list[int], preset_cap: int, floor: int = 1024, mult: float = 2.0,
+                           q: float = 0.99, step: int = 256) -> int:
+    """Completion cap for GRPO rollouts: mult x the q-quantile of the lengths the model stops at by itself,
+    rounded up to `step`, within [floor, preset_cap].
+
+    A rollout that never stops costs the whole cap in wall-clock time (one stream is ~60-100 token/s), and with
+    100+ rollouts per step there is almost always one. A cap far above what the model ever writes only buys
+    waiting time; 2 x p99 still leaves room for answers to grow.
+    """
+    if not stopped_lengths:
+        return preset_cap
+    xs = sorted(stopped_lengths)
+    p = xs[min(len(xs) - 1, int(q * len(xs)))]
+    cap = int(math.ceil(mult * p / step) * step)
+    return max(min(floor, preset_cap), min(preset_cap, cap))
+
+
+def lora_delta(path_a: str, path_b: str) -> dict:
+    """How far adapter b is from adapter a (two save_lora directories): ||b - a|| / ||a|| over all LoRA tensors.
+
+    A sanity check that a training stage moved the weights at all, and by how much compared with another
+    stage (e.g. GRPO vs the SFT adapter it started from)."""
+    import torch
+    from safetensors.torch import load_file
+
+    a = load_file(str(Path(path_a) / "adapter_model.safetensors"))
+    b = load_file(str(Path(path_b) / "adapter_model.safetensors"))
+    num = den = 0.0
+    max_abs = 0.0
+    for k, va in a.items():
+        if k not in b or va.shape != b[k].shape:
+            continue
+        d = b[k].float() - va.float()
+        num += float(torch.sum(d * d))
+        den += float(torch.sum(va.float() ** 2))
+        max_abs = max(max_abs, float(d.abs().max()))
+    return {"rel_change": round(math.sqrt(num / den), 5) if den > 0 else None,
+            "abs_change": round(math.sqrt(num), 4), "max_abs_change": round(max_abs, 6), "norm_a": round(math.sqrt(den), 3)}
+
+
 # ---------------------------------------------------------------- tokenizer / config helpers
 
 
@@ -522,14 +715,17 @@ def log_eval(wandb, results: dict, tag: str) -> None:
                 wandb.run.summary[f"gpqa/{cfg}/{tag}/{k}"] = v
 
 
+TABLE_COLS = ["stage", "set", "acc_flex", "acc_flex_se", "samples", "acc_strict", "extract_rate", "truncation_rate",
+              "mean_tokens"]
+
+
 def print_table(results: dict) -> list[list]:
-    """results = {stage: {config: aggregate}} -> printed table; returns the rows (for wandb.Table)."""
-    cols = ["stage", "set", "acc_flex", "acc_strict", "extract_rate", "truncation_rate", "mean_tokens"]
-    print(" ".join(f"{c:>15s}" for c in cols))
+    """results = {stage: {config: aggregate}} -> printed table; returns the rows (columns = TABLE_COLS)."""
+    print(" ".join(f"{c:>15s}" for c in TABLE_COLS))
     rows = []
     for stage, per_set in results.items():
         for cfg, v in per_set.items():
-            row = [stage, cfg] + [v.get(c) for c in cols[2:]]
+            row = [stage, cfg] + [v.get(c) for c in TABLE_COLS[2:]]
             rows.append(row)
             print(" ".join(f"{str(x):>15s}" for x in row))
     return rows

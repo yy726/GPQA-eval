@@ -67,26 +67,59 @@ GRPO 日志：总奖励 2.49 → 2.83；格式奖励 0.84 → 0.99；正确率�
 5. 实测速度：SFT 6.6k token/秒（4B，810 万 token 20.6 分钟），GRPO 15 秒/步（16 个回答，≤1536），整轮约 1.6 小时。
 6. 数据：`include=["logic"]` 抽到了 2900 条 Logic Puzzles（29%），科学只有约 19%。→ 去掉 logic。
 
-### 之后的修改（notebook 11 新版，以及 12/13）
+### X1 之后的修改（X1b 用的版本）
 
 - 模板 `CHAT_STYLE="olmo"`（见上）；评测加 `repeat_rate` / `answer_then_more` / `glitch_rate`；SFT 后 teacher forcing 检查 eos 概率。
-- **锁定评测生成预算 4096 → 8192**（main 规则，2026-11-11）。`a100` 预设：上下文 12288、快速评测 8192、SFT 样本 ≤6144、GRPO 回答 ≤6144，截断惩罚改成 DAPO 的软超长惩罚（最后 1024 token 线性扣到 −1）。
+- **锁定评测生成预算 4096 → 8192**（main 规则，2026-11-11）。`a100` 预设：上下文 12288、快速评测 8192、SFT 样本 ≤6144、GRPO 回答 ≤6144，截断惩罚改成 DAPO 的软超长惩罚。
 - SFT：去掉 logic；`SFT_SELECT="coverage"`（Dr.SCI 的 EESFT：按 4-gram 覆盖度从 3 倍候选里挑）。
-- GRPO（照 OLMo 3 / DAPO / Dr.SCI）：MMLU-Pro STEM 选择题 + Dr.SCI 数值题；每段开始前按当前模型通过率预筛（留 1–3/4）；两段课程（Dr.SCI 通过率 0.5–0.875 → 0.25–0.375）；每步 4 道题 × 8；`epsilon_high=0.28`；常数学习率；格式分 0.5。
-- 流程照 OLMo 3：**SFT → DPO → GRPO**（OLMo 3：RL 从 DPO 检查点开始更好）。DPO 用 OLMo 3 公开的 `allenai/Dolci-Instruct-DPO` 里的 delta learning 对（chosen = Qwen3-32B，rejected = Qwen3-0.6B），合规，可以上榜。
+- GRPO（照 OLMo 3 / DAPO / Dr.SCI）：MMLU-Pro STEM 选择题 + Dr.SCI 数值题；每段开始前按当前模型通过率预筛（留 1–3/4）；两段课程；每步 4 道题 × 8；`epsilon_high=0.28`；常数学习率；格式分 0.5。
+- 流程照 OLMo 3：**SFT → DPO → GRPO**。DPO 用 OLMo 3 公开的 `allenai/Dolci-Instruct-DPO` 里的 delta learning 对（chosen = Qwen3-32B，rejected = Qwen3-0.6B），合规，可以上榜。
 
-### 下一步（300 CU；时间为估计）
+### run4 = X1b · 2026-11-11 · Qwen3-4B-Base · `a100` · **A100 40GB**（[带输出的 notebook](runs/run4_x1b_a100_qwen3-4b.ipynb)）
+
+配置：Dolci-Instruct（科学/数学）6 万候选 → 覆盖度选 2 万条（4-gram 覆盖 880 万 vs 随机 603 万）+ SciQ 格式 2000 条，2170 万 token → SFT 1375 步（58 分钟，loss 0.80 → 0.56）→ GRPO `mix` 两段各 50 步（每步 4 题 × 8，学习率 5e-6，回答 ≤6144；每段预筛 4 分钟 + 训练 18 分钟）。没设 `PUSH_SFT_REPO`，SFT 模型没有保存到 HF。
+
+| 阶段 | Diamond flex | Main flex | strict（D / M） | 可提取率（D / M） | 截断率（D / M） | 平均 token（D / M） | 评测时间 |
+|---|---|---|---|---|---|---|---|
+| base | 26.3 | 23.7 | 0.5 / 0.2 | 78 / 81 | 41 / 37 | 3619 / 3354 | 29 分钟 |
+| SFT | **37.4** | 29.7 | 36.9 / 29.2 | 97 / 94 | **3.0 / 4.7** | 392 / 521 | 6 分钟 |
+| GRPO | 30.8 | **30.8** | 30.8 / 30.6 | 97 / 96 | 3.5 / 3.6 | 440 / 438 | 5.5 分钟 |
+
+（单样本，温度 0.6。Main 的 448 题包含全部 198 道 Diamond 题。）
+
+**结束符修好了**：SFT 后截断率 97% → 3–5%，`glitch_rate` 0，teacher forcing 下答案结尾预测 `<|endoftext|>` 的概率中位数 0.9999；strict 和 flex 基本一致。
+
+**为什么 GRPO 看起来比 SFT 差——其实是没有变化**：
+1. **评测噪声**。单样本时 Diamond（198 题）一次评测的标准误约 3.4 分，两个阶段之差约 4.8 分；Diamond 的 −6.6 只有 1.4 个标准误。包含全部 Diamond 题的 Main 上 GRPO 是 +1.1（X1 也是同样的图案：Diamond −5.0、Main +1.8）。SFT 自己的两个数字也对不上：如果 Main 里那 198 道 Diamond 题也是 37.4%，剩下 250 题只有 23.6%，低于随机。→ 只能说"GRPO ≈ SFT"。
+2. **GRPO 的训练奖励是平的**：正确性奖励第一段 0.93 → 1.08（10 步平均的标准误约 0.08），第二段 1.05 → 1.05；格式分一直在 0.45–0.48（满分 0.5），超长惩罚约 0。也就是说连训练分布上都没有学到东西。
+3. **原因一：训练量太小**。100 次更新 × 4 道题 = 400 道题、每题只见一次、共 3200 个回答。OLMo 3 的 RL 每步 64 题 × 8，Dr.SCI 是几十万道题 × 多个 epoch，差 2–3 个数量级。学习率 5e-6 × 100 步，每个 LoRA 参数最多移动 5e-4。
+4. **原因二：容易学的东西 SFT 已经学完了**。X1 里 GRPO"有用"是因为有一个所有题目都一致的信号（截断 71% → 2%）；X1b 的 SFT 已经会收尾、会写答案格式，剩下的只有"这道题选 B"这种每题不同的信号——一道选择题 1 bit、25% 能猜中，功劳还要摊到约 350 个 token 上，每步 4 道题时梯度几乎全是噪声。
+5. **原因三：SFT 后的回答没有推理可以强化**。回答平均 300–400 token（最短 7–50 token），是"背一段相关知识 + The answer is (X)"的风格（来自 SciQ 格式样本和 Dolci-Instruct 的短答案）。RL 只能在模型已经会采样到的行为里做选择；诊断里 GRPO 后贪心回答反而更短（同一道 SciQ 题 226 → 55 token），它在往"更快作答"漂。
+6. **SFT 的提分主要来自"答完"**。Main 上：可提取率 81% → 94%，而**有答案的题里的准确率**只是 29.3% → 31.4%（GRPO 后 32.2%）。总分 +6.0 里约 4 分来自收尾 / 格式，约 2 分来自答得更对。要再往上，需要真正提高"答对率"的手段：思维链 SFT（8192 预算下 `THINK_N` 现在可用）、DPO 的 32B vs 0.6B 偏好对、蒸馏。
+7. 排除掉的嫌疑：字母偏置（按各阶段的选项分布算，随机猜的期望都是 24–25%）；Unsloth 的 GRPO 实现（`loss_type=dapo`、`beta=0`、组内归一化，vLLM 重要性采样修正默认关闭，权重确实变了）。
+8. 实测速度：SFT 6.2k token/秒；GRPO 每步 21 秒（32 个回答，生成约 6 秒 + 训练约 4 秒，其余是偶尔写满 6144 token 的回答在拖）；预筛 2400 个回答 4 分钟。
+
+### X1b 之后的修改（notebook 11 现在的版本，12 / 13 同步）
+
+- **快速评测**（`recipe_utils.QuickEval`，11 / 12 / 13 / `quick_eval.py` 共用）：每题采样 `eval_samples` 次（a100 = 4），`acc_flex` 是 avg@k，附标准误；汇总里给**阶段之间的配对差值 ± 标准误**；Main 另报其中 Diamond 题和其余题的准确率。base 默认不再评测（`RUN_BASE_EVAL=False`，已知 26 / 24，省 30 分钟）。
+- **GRPO 规模**：每步 16 题 × 8（原 4 × 8），120 步 = 1920 道题（原 400）；学习率 1e-5；预筛候选 2 倍。
+- **留出验证集** `rl_val`：300 道不参与训练的同分布题（MMLU-Pro STEM + Dr.SCI 数值题），每题采样 4 次；训练前、每段之后各测一次，给出通过率和配对差值。它不涨 = GRPO 没学到能泛化的东西；它涨了但 GPQA 不涨 = 迁移问题。
+- **回答上限**按模型自己的长度定（`GRPO_MAX_COMPLETION="auto"`：2 × 收尾长度的 99 分位）：上限 6144 而回答只有 400 token 时，偶尔一个停不下来的回答会让整步多等一分钟。
+- 每段记录 `adapter_change`（LoRA 权重相对上一段变了多少）；`FINAL_ADAPTER` 可以选择合并 SFT 而不是 GRPO。
+- 旧 notebook 02 / 03 / 10 也改成 `setup_chat(style="olmo")`（之前还是 `<|im_end|>` 结尾，会重现 X1 的问题）。
+
+### 下一步（时间为估计）
 
 | 顺序 | notebook | 内容 | 时间（估） |
 |---|---|---|---|
-| X1b | 11 | SFT（新模板、无 logic、coverage 选择）；`RUN_GRPO=False`，**设 `PUSH_SFT_REPO`** | 约 1.2 小时 |
-| D1 | 12 | `INIT_MODEL`=X1b SFT，`DPO_DATA="dolci"`（约 8000 对科学/数学 delta 对），**设 `PUSH_REPO`** | 约 40 分钟 |
-| R1 | 11 | `RUN_SFT=False`、`INIT_MODEL`=D1，`GRPO_DATA="mix"`，两段课程 | 约 2–3 小时 |
-| P1 | 14 | 知识探针：base / X1b SFT 各一次 | 约 2 × 40 分钟 |
+| X2 | 11 | SFT + GRPO（默认配置）；**设 `PUSH_SFT_REPO`**。看 `rl_val` 和配对比较 | SFT 1 小时 + GRPO 1.5–2 小时 |
+| D1 | 12 | `INIT_MODEL`=X2 的 SFT，`DPO_DATA="dolci"`（约 8000 对科学/数学 delta 对），**设 `PUSH_REPO`** | 约 40 分钟 |
+| T1 | 11 | `THINK_N=5000`（短思维链 SFT，8192 预算下可用），`RUN_GRPO=False`：和 X2 的 SFT 比"有答案的题里的准确率" | 约 1.5 小时 |
+| R1 | 11 | `RUN_SFT=False`、`INIT_MODEL`=D1 或 T1 里更好的那个，只跑 GRPO | 约 2 小时 |
 | K1 | 13 | Qwen3-32B → 4B 蒸馏（只作参考） | 约 2 小时 |
 | 终跑 | — | 最好的模型 → 推 HF（公开）→ `main` 的 `01` 锁定评测（8192） | 约 1.5 小时 |
 
-成功标准：X1b 的 SFT 后截断率 < 30%、`glitch_rate` ≈ 0、teacher forcing 的 eos 概率接近 1；R1 的合计准确率高于 X1b。
+判断标准：GRPO 是否有用看 `rl_val` 的配对差值（|z| ≥ 2 才算数）和 GPQA Main 的配对差值；如果 X2 的 `rl_val` 仍然不动，把额度留给 DPO / 思维链 SFT，不要再加 GRPO 步数。
 
 ## notebook 10（锁定评测）
 
