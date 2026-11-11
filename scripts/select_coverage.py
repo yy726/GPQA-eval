@@ -90,6 +90,35 @@ def covered_ngrams(texts: list[str], n: int = 4) -> int:
     return len(seen)
 
 
+def select_per_part(rows: list[dict], targets: dict, method: str = "coverage", norm: str = "sqrt",
+                    seed: int = 0) -> tuple[list[dict], dict]:
+    """Pick targets[part] rows from each part (row["part"]) of a candidate pool.
+
+    method "coverage": greedy 4-gram coverage inside the part (a part with no more candidates than its
+    target is kept whole); "random": a seeded random sample. Parts without a target are dropped.
+    Returns (selected rows, {part: {"pool", "target", "selected", "tokens"}}).
+    """
+    import random
+
+    by_part: dict = {}
+    for r in rows:
+        by_part.setdefault(r.get("part"), []).append(r)
+    out, info = [], {}
+    for part, target in targets.items():
+        cand = by_part.get(part, [])
+        if len(cand) <= target:
+            chosen = list(cand)
+        elif method == "coverage":
+            idx = select([example_text(r) for r in cand], target, norm=norm)
+            chosen = [cand[i] for i in idx]
+        else:
+            chosen = random.Random(seed).sample(cand, target)
+        out.extend(chosen)
+        info[part] = {"pool": len(cand), "target": target, "selected": len(chosen),
+                      "tokens": sum(r.get("n_tokens") or 0 for r in chosen)}
+    return out, info
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--in", dest="inp", type=Path, required=True, help="JSONL with messages or prompt/completion")

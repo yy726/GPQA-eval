@@ -363,3 +363,11 @@ def test_lora_delta(tmp_path):
         st.save_file(sd, str(tmp_path / name / "adapter_model.safetensors"))
     d = ru.lora_delta(str(tmp_path / "a"), str(tmp_path / "b"))
     assert d["rel_change"] == 0.5 and d["max_abs_change"] == 0.5     # ||b-a|| = 1, ||a|| = 2
+
+
+def test_sft_repo_name_and_auto_init_model():
+    assert ru.sft_repo_name("alice", "unsloth/Qwen3-4B-Base") == "alice/qwen3-4b-s1-sft"
+    assert ru.sft_repo_name("alice", "unsloth/Qwen3-0.6B-Base-unsloth-bnb-4bit") == "alice/qwen3-0.6b-s1-sft"
+    assert ru.resolve_init_model("auto", "alice", "unsloth/Qwen3-4B-Base") == "alice/qwen3-4b-s1-sft"
+    assert ru.resolve_init_model(None, "alice", "x/Qwen3-4B-Base") is None
+    assert ru.resolve_init_model("/content/drive/m", "alice", "x/Qwen3-4B-Base") == "/content/drive/m"

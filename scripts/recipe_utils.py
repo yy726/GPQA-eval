@@ -635,7 +635,46 @@ def lora_delta(path_a: str, path_b: str) -> dict:
             "abs_change": round(math.sqrt(num), 4), "max_abs_change": round(max_abs, 6), "norm_a": round(math.sqrt(den), 3)}
 
 
+def dpo_loss_kwargs(cls, loss_type: str = "sigmoid_norm", sft_weight: float | None = None,
+                    beta: float | None = None) -> dict:
+    """DPOConfig loss settings that work across TRL versions.
+
+    loss_type "sigmoid_norm" = length-normalised DPO (Tulu 3 / OLMo 3 `dpo_norm`): the log-ratio is averaged
+    over the answer's tokens, so a longer answer does not win just by being longer. Falls back to "sigmoid"
+    if this TRL does not have it. beta None -> 5.0 for sigmoid_norm (OLMo 3), 0.1 for the others.
+    sft_weight adds an NLL term on the chosen answer (RPO / IRPO): TRL >= 1.x takes it as a second loss
+    ("sft" with loss_weights), older TRL as rpo_alpha.
+    """
+    names = {f.name for f in dataclasses.fields(cls)}
+    if loss_type == "sigmoid_norm" and "sigmoid_norm" not in (cls.__doc__ or ""):
+        print("[i] this TRL has no 'sigmoid_norm' DPO loss; using 'sigmoid'")
+        loss_type = "sigmoid"
+    out: dict = {"loss_type": loss_type, "beta": beta if beta is not None else (5.0 if loss_type == "sigmoid_norm" else 0.1)}
+    if sft_weight:
+        if "loss_weights" in names:
+            out.update(loss_type=[loss_type, "sft"], loss_weights=[1.0, float(sft_weight)])
+        elif "rpo_alpha" in names:
+            out["rpo_alpha"] = float(sft_weight)
+        else:
+            print("[i] this TRL has neither loss_weights nor rpo_alpha: no NLL term on the chosen answer")
+    return out
+
+
 # ---------------------------------------------------------------- tokenizer / config helpers
+
+
+def sft_repo_name(hf_user: str, model_name: str) -> str:
+    """HF repo of the shared SFT checkpoint written by notebook 15 (and read by 11 / 12 / 13 when INIT_MODEL="auto"):
+    "<user>/qwen3-4b-s1-sft" for unsloth/Qwen3-4B-Base, "<user>/qwen3-0.6b-s1-sft" for the 0.6B quick mode."""
+    tag = model_name.split("/")[-1].lower()
+    for suffix in ("-unsloth-bnb-4bit", "-bnb-4bit", "-base"):
+        tag = tag.replace(suffix, "")
+    return f"{hf_user}/{tag}-s1-sft"
+
+
+def resolve_init_model(init_model, hf_user: str, model_name: str):
+    """INIT_MODEL "auto" -> the shared SFT checkpoint repo; anything else (None, a repo id, a local path) unchanged."""
+    return sft_repo_name(hf_user, model_name) if init_model == "auto" else init_model
 
 
 def setup_chat(tokenizer, model=None, style: str = "olmo", force: bool = True) -> list[int]:
@@ -770,7 +809,7 @@ def prepare_sft_sources(sources: list[dict], tokenizer: str, max_tokens: int, sc
     """Sample SFT rows from several HF datasets with scripts/prepare_dolci_sft.py.
 
     Each source: dict(dataset=..., n=..., include=[...], exclude=[...], config=None, split="train",
-    strip_think=False, max_tokens=None). Returns [{"messages", "source", "dataset", "n_tokens"}].
+    strip_think=False, max_tokens=None, part=None). Returns [{"messages", "source", "dataset", "n_tokens", "part"}].
     """
     rows: list[dict] = []
     os.makedirs(workdir, exist_ok=True)
@@ -793,5 +832,5 @@ def prepare_sft_sources(sources: list[dict], tokenizer: str, max_tokens: int, sc
         for line in out.read_text().splitlines():
             r = json.loads(line)
             rows.append({"messages": r["prompt"] + r["completion"], "source": r.get("source"),
-                         "dataset": src["dataset"], "n_tokens": r.get("n_tokens")})
+                         "dataset": src["dataset"], "n_tokens": r.get("n_tokens"), "part": src.get("part")})
     return rows

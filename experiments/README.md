@@ -5,11 +5,13 @@
 
 | 文件 | 作用 |
 |---|---|
-| `notebooks/11_sft_grpo_unsloth.ipynb` | **主力 notebook**：SFT（Dolci 科学/数学 + 可选思维链 / 额外数据 + 4-gram 覆盖度选样 + 选择题格式）→ GRPO（MMLU-Pro STEM + Dr.SCI 数值题，通过率预筛 + 两段课程 + 软超长惩罚，每步 16 题 × 8，留出验证集），OLMo 风格结束符，GPQA 快速评测（≤8192，每题采样 4 次 + 阶段间配对比较）+ 诊断，W&B。模式 `quick` / `medium` / `a100` |
-| `notebooks/12_dpo_unsloth.ipynb` | **DPO**：从 11 的 SFT 模型出发，默认用 OLMo 3 公开的 Dolci-Instruct-DPO（delta learning：Qwen3-32B vs 0.6B），也可用自己采样的"答对且收尾 vs 答错或没停"；可迭代 |
-| `notebooks/13_distill_gkd.ipynb` | **知识蒸馏（GKD）**：Qwen3-32B（4-bit）→ Qwen3-4B-Base，离线对齐老师的逐 token 分布。**只作参考，不参与排名** |
+| `notebooks/15_sft_checkpoint.ipynb` | **先跑这个**：共享 SFT 检查点 S1，只训练一次（约 4 小时），推到 HF 私有仓库；11 / 12 / 13 都从它开始。数据配方 = MegaScience 教材题 + GPQA 题面的 4 选 1 科学题 + Dolci 科学 / 数学（依据见 `experiments/DATASETS.md`）；检查点存 Google Drive，可续训 |
+| `notebooks/11_sft_grpo_unsloth.ipynb` | **GRPO**（默认 `INIT_MODEL="auto"` = S1）：留出的 4 选 1 科学题 + MMLU-Pro STEM + Dr.SCI 数值题，通过率预筛 + 两段课程 + 软超长惩罚，每步 16 题 × 8，留出验证集；GPQA 快速评测每题采样 8 次 + 阶段间配对比较。`RUN_SFT=True` 可以重现 X1b 的旧流程 |
+| `notebooks/12_dpo_unsloth.ipynb` | **DPO**（从 S1 开始）：OLMo 3 公开的 Dolci-Instruct-DPO 的科学 / 数学偏好对 + 在留出科学题上自己采样的"答对 vs 答错"；长度归一化 DPO；合并后推到 HF，可以接着做 GRPO |
+| `notebooks/13_distill_gkd.ipynb` | **知识蒸馏（GKD）**：Qwen3-32B（4-bit）→ S1，离线对齐老师的逐 token 分布。**只作参考，不参与排名** |
 | `notebooks/14_decision_probe.ipynb` | **Decision 知识探针**：加打分头直接选选项（不生成文字），测 4B 不写思维链"知道"多少。只做分析，不能提交 |
-| `scripts/recipe_utils.py` / `scripts/quick_eval.py` / `scripts/select_coverage.py` | 11–14 共用：聊天模板与结束符、题面、答案提取与诊断指标、多次采样的快速评测与配对比较（`QuickEval`）、GRPO 奖励（选择题 / 数值题 / 软超长惩罚）、Dr.SCI 与 Dolci DPO 转换、去污染、多数据源抽样、4-gram 覆盖度选样 |
+| `scripts/science_mix.py` | S1 的科学数据配方（MegaScience 选择题 → GPQA 题面、按学科抽教材题）和留给 GRPO / DPO / 验证的题库（按题目哈希拆分） |
+| `scripts/recipe_utils.py` / `scripts/quick_eval.py` / `scripts/select_coverage.py` | 11–15 共用：聊天模板与结束符、题面、答案提取与诊断指标、多次采样的快速评测与配对比较（`QuickEval`）、GRPO 奖励（选择题 / 数值题 / 软超长惩罚）、Dr.SCI 与 Dolci DPO 转换、去污染、多数据源抽样、4-gram 覆盖度选样 |
 | `experiments/DATASETS.md` | 可能对 GPQA 有用的数据集（MegaScience、Dr.SCI、OpenThoughts3…）和用法 |
 | `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
@@ -17,7 +19,8 @@
 | `scripts/prepare_dolci_sft.py` | Dolci 流式读取、按来源和长度过滤、可选去掉 `<think>` |
 | `scripts/analyze_samples.py` | 从本地逐题日志算聚合诊断（准确率、可提取率、截断率、长度、字母分布），不输出题目 |
 
-notebook 11（SFT + GRPO，快速）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/11_sft_grpo_unsloth.ipynb)
+notebook 15（共享 SFT 检查点，先跑）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/15_sft_checkpoint.ipynb)
+notebook 11（GRPO）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/11_sft_grpo_unsloth.ipynb)
 notebook 10（SFT + 锁定评测）：[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yy726/GPQA-eval/blob/submission-yy726/notebooks/10_iterate_0p6b.ipynb)
 
 ## 用多大的模型？
@@ -77,10 +80,10 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 | **Qwen3-4B**（推荐） | 16-bit LoRA r=64 | **~6.6k tok/s（X1 实测）**，≈24M token/小时 | **~21 秒/步（X1b 实测，32 个回答，平均约 350 token）**；新版每步 128 个回答，估 30–45 秒/步 |
 | Qwen3-8B | 16-bit LoRA | ~1.5–2k tok/s | 更慢；不在比赛允许的起点里 |
 
-**每次实验（4B，`MODE="a100"`）**：SFT 2 万条（2170 万 token）约 1 小时（X1b 实测）；GRPO 120 步（每步 16 题 × 8）含预筛和验证约 1.5–2 小时（估）；快速评测（Diamond 198 + Main 448，≤8192，每题 4 次采样）回答正常结束时每个阶段约 10 分钟；base 不收尾，单次采样就要 30 分钟（默认跳过）。
+**每次实验（4B，`MODE="a100"`）**：S1 的 SFT 约 10.9 万条（7600 万 token）约 3.5 小时（按 X1b 实测的 6.2k token/秒估）；GRPO 120 步（每步 16 题 × 8）含预筛、验证和两次评测约 3.3 小时（估）；DPO 约 1.8 小时（估）；快速评测（Diamond 198 + Main 448，≤8192，每题 4 次采样）回答正常结束时每个阶段约 10 分钟；base 不收尾，单次采样就要 30 分钟（默认跳过）。
 **全量 Dolci 不现实**：Instruct 约 215 万条（≈1–1.5B token，4B 要 100+ 小时）；Think 约 190 万条（>10B token）。
 
-**流程**（照 OLMo 3，详见 `results.md`）：notebook 11 SFT（`PUSH_SFT_REPO`）→ notebook 12 DPO（Dolci-Instruct-DPO 的 32B vs 0.6B delta 对，`PUSH_REPO`）→ notebook 11 GRPO（`RUN_SFT=False`、`INIT_MODEL`=DPO 模型）。
+**流程**（照 OLMo 3，详见 `results.md` 的额度安排）：notebook 15 训练共享 SFT 检查点 S1（只一次）→ notebook 12 DPO、notebook 11 GRPO、notebook 13 蒸馏都从 S1 开始（`INIT_MODEL="auto"`）→ 可选：GRPO 再从 DPO 模型开始（`INIT_MODEL` 填 12 推上去的仓库）。HF 仓库名按登录的用户名自动生成，不用手填。
 借鉴来源：OLMo 3 / open-instruct（结束符、SFT→DPO→RL、clip-higher、去掉无信号的组）、Dr.SCI（4-gram 覆盖度选 SFT 数据、按难度的课程、数值题）、DAPO（软超长惩罚）、Delta Learning（弱对弱的偏好对）。
 
 ## Weights & Biases
@@ -94,16 +97,16 @@ notebook 11 会自动记录（写法同 [rlhf-book `policy_gradients/train.py`](
 ## 更多配方（notebook 12–14）
 
 都照 Unsloth 官方 notebook 的写法，配置格有 `quick`（0.6B / T4 验证流程）和 `a100` 两档；W&B、快速评测和报告 JSON 的格式同 notebook 11。
-12–14 都还没在 GPU 上跑过：**先用 `MODE="quick"` 跑一遍**确认流程，再上 A100。
+12–15 都还没在 GPU 上跑过：**先用 `MODE="quick"` 跑一遍**确认流程（15 → 11 / 12），再上 A100。
 
 | notebook | 参考的 Unsloth 示例 | 做什么 | A100 时间（估） | 能上榜吗 |
 |---|---|---|---|---|
-| 12 DPO | [Zephyr (7B) DPO](https://github.com/unslothai/notebooks/blob/main/nb/Zephyr_(7B)-DPO.ipynb) | `INIT_MODEL` = 11 的 SFT；默认 `DPO_DATA="dolci"`：OLMo 3 的 Dolci-Instruct-DPO 里 delta learning 对（Qwen3-32B vs 0.6B），按来源留科学/数学；`"onpolicy"`：自己采样的答对且收尾 vs 答错或没停；`ROUNDS=2` 迭代 | `dolci` 约 40 分钟 | 能（公开数据集；T4 上重跑） |
-| 13 蒸馏 | [Qwen3 (0.6B) Knowledge Distillation](https://github.com/unslothai/notebooks/blob/main/python_scripts/Qwen3_(0.6B)-Knowledge_Distillation.py) | TRL `GKDTrainer` + Unsloth 分块损失；老师 Qwen3-32B 4-bit（官方 GPQA-D 68.4 / 54.6，OOM 换 14B），学生 4B 16-bit LoRA；默认离线（`lmbda=0`），短答案数据 | 约 2 小时 | **不能**（老师是官方后训练模型） |
+| 12 DPO | [Zephyr (7B) DPO](https://github.com/unslothai/notebooks/blob/main/nb/Zephyr_(7B)-DPO.ipynb) | 从 S1 开始；`DPO_DATA="both"`：Dolci-Instruct-DPO 的科学 / 数学偏好对约 6000 对（delta learning 和 LLM 判分两种）+ 留出科学题上自己采样的"答对 vs 答错"约 1500 对；长度归一化 DPO（`sigmoid_norm`，β=5）；`ROUNDS=2` 迭代 | 约 1.8 小时 | 能（公开数据集；T4 上重跑） |
+| 13 蒸馏 | [Qwen3 (0.6B) Knowledge Distillation](https://github.com/unslothai/notebooks/blob/main/python_scripts/Qwen3_(0.6B)-Knowledge_Distillation.py) | TRL `GKDTrainer` + Unsloth 分块损失；老师 Qwen3-32B 4-bit（官方 GPQA-D 68.4 / 54.6，OOM 换 14B），学生从 S1 开始（16-bit LoRA）；离线（`lmbda=0`），教材题 + GPQA 题面选择题；结束符位置不算损失 | 约 2 小时 | **不能**（老师是官方后训练模型） |
 | 14 探针 | [Qwen3.5 (4B) Decision](https://github.com/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)-Decision.ipynb) | `FastDecisionModel` 在 MMLU-Pro STEM + SciQ 上训练打分头，对 GPQA 只算准确率 / 分学科准确率；换 `BACKBONE` 对比 base 和 SFT | 约 40 分钟 | 不能（不生成文字） |
 
 注意：
-- 12 依赖 11 推到 HF 的 SFT 模型（11 里设 `PUSH_SFT_REPO`）。
+- 11 / 12 / 13 默认依赖 15 推到 HF 的 S1（`INIT_MODEL="auto"`）；HF_TOKEN 要有 write 权限。
 - 13 安装时把 TRL 固定到 0.25.1（Unsloth 蒸馏示例测过的版本）；如果开头的"分块损失已接上"检查失败，Runtime → Restart session 后重跑。
 - 13 和 14 的 GPQA 评测在独立进程里跑（`scripts/quick_eval.py` / 本地 `evaluate`），只输出聚合数字。
 
