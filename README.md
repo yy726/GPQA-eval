@@ -95,7 +95,7 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 - 任务：`gpqa_diamond_cot_zeroshot`、`gpqa_main_cot_zeroshot`
 - 后端：vLLM（跑不通时回退 HF transformers）
 - **版本锁定**（见 [`requirements-eval.txt`](requirements-eval.txt)）：`lm-eval==0.4.13`（不同 lm-eval 版本的 GPQA 预处理不同，分数不能混用）+ 对应的 vLLM（≥ 0.18；实测 vLLM 0.33 能在 Colab T4 上加载 Qwen3）。T4 不支持 FlashInfer 采样器，`eval_gpqa.sh` 会设置 `VLLM_USE_FLASHINFER_SAMPLER=0`（只影响实现，不影响分数）
-- `dtype=float16`（T4 没有 bf16），`max_model_len=8192`，`max_gen_toks=4096`
+- `dtype=float16`（T4 没有 bf16），`max_model_len=12288`，`max_gen_toks=8192`（2026-11-11 起；之前是 4096）
 - `temperature=0.6`，`top_p=0.95`，使用模型自带 chat template（`--apply_chat_template`）
 - 4 个 vLLM 采样 seed（0–3）；lm-eval 的 `--seed` 固定为 0，保证所有人的选项顺序一致
 - 报告均值 ± 跨 seed 标准误
@@ -112,14 +112,15 @@ python scripts/aggregate_results.py results/my-model --model my-team/my-model --
 | 4B LoRA 训练吞吐 | ~1–2k tok/s → 4 小时约 10–25M token | 待 T4 实测 |
 | Dolci 长思维链 | 先按长度过滤（≤ 4k token），再抽 2k–10k 条 | — |
 | GRPO | 每步 2 题 × 4 采样，最长 768 token，几百步 | 待 T4 实测 |
-| 评测（vLLM，4 seed） | 估计 20–40 分钟；HF 后端慢 5–10 倍 | 待 T4 实测 |
+| 评测（vLLM，4 seed，8192 生成预算） | 估计 40–90 分钟；HF 后端慢 5–10 倍 | 待 T4 实测 |
 
 > "待 T4 实测"的数字会在助教跑完 `00_smoke_test_t4.ipynb` 后更新到这里。
 
 ### 已知风险 / Known risks
 
 - **fp16**：T4 没有 bf16，模型以 fp16 运行。Qwen3 在 fp16 下一般稳定，`00` 的 Test 1 会检查输出是否正常（没有乱码或 NaN）。
-- **Thinking 模式**：官方 `Qwen3-4B` 的 chat template 默认开 thinking，在 4096 token 预算下长思考会被截断；这是锁定配置的一部分，对所有人一样。
+- **Thinking 模式**：官方 `Qwen3-4B` 的 chat template 默认开 thinking，在 8192 token 预算下很长的思考仍会被截断；这是锁定配置的一部分，对所有人一样。
+- **评测时间**：生成预算 8192 比 4096 慢，4 个 seed 的整轮评测预计慢 1.5–2.5 倍（取决于模型写多长）；T4 的 KV cache 够同时跑 2–3 条满长序列，其余由 vLLM 自动排队。
 - **Unsloth / vLLM 版本冲突**：Colab 上偶尔会互相覆盖依赖（例如 numpy）。建议评测和训练用不同的 runtime。
 - **Colab 断线**：训练 checkpoint 会自动推到你的私有 `<repo>-ckpt` 仓库，可以续训。
 
