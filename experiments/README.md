@@ -92,7 +92,7 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 
 notebook 11 / 12 / 13 / 15 都按"Run all 之后可以离开"设计：
 
-1. **开头只需要点一次**：Google Drive 的授权弹窗（`USE_DRIVE=True`）。HF 和 W&B 的 key 从 Colab Secrets 读，HF 仓库名按登录的用户名自动生成。
+1. **开头只需要点一次**：Google Drive 的授权弹窗（`USE_DRIVE=True`，账号和 Drive 权限都要勾选）。挂载失败会直接报错停下，不会悄悄改存本地；确实不想用 Drive 就设 `USE_DRIVE=False`。HF 和 W&B 的 key 从 Colab Secrets 读，HF 仓库名按登录的用户名自动生成。
 2. **每个阶段做完就落盘**：数据、训练检查点、每一段 GRPO / 每一轮 DPO 的 adapter 和结果、老师的回答、每次评测的结果，都写到 Drive 的 `gpqa_ckpt/<实验名>_<模式>/`。
 3. **断线后重新打开、再 Run all**：已完成的阶段直接读回（打印 `(cached)` / "已经完成"），SFT 从最近的检查点续训，GRPO 从没做完的那一段开始。`RESUME=False` 强制全部重来。
    配置变了（换了起点模型、学习率、数据量……）时旧结果自动作废；想保留旧结果就换一个 `EXP_NAME`。

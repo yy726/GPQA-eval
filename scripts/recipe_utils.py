@@ -874,21 +874,47 @@ def restore_lora(model, path: str | None = None) -> dict:
     return {"reset_layers": n}
 
 
-def persist_dir(name: str, use_drive: bool = True, root: str = "/content/drive/MyDrive/gpqa_ckpt") -> str:
+def persist_dir(name: str, use_drive: bool = True, root: str = "/content/drive/MyDrive/gpqa_ckpt",
+                mountpoint: str = "/content/drive") -> str:
     """Directory for everything that must survive a Colab runtime reset (adapters, checkpoints, stage and
-    eval results): Google Drive when it can be mounted, else ./outputs/<name> (lost with the runtime)."""
+    eval results): Google Drive when use_drive, else ./outputs/<name> (lost with the runtime).
+
+    If Drive cannot be mounted this raises instead of quietly falling back to local disk: a multi-hour run
+    whose checkpoints vanish with the runtime is exactly what this is meant to prevent. Set use_drive=False
+    to run without Drive on purpose. Outside Colab it falls back to ./outputs/<name>.
+    """
     path = os.path.join("outputs", name)
     if use_drive:
         try:
             from google.colab import drive
-
-            if not os.path.ismount("/content/drive"):
-                drive.mount("/content/drive")
+        except Exception:
+            print(f"[i] not on Colab: saving to {path}")
+            drive = None
+        if drive is not None:
+            if not os.path.ismount(mountpoint):
+                _mount_drive(drive, mountpoint)
             path = os.path.join(root, name)
-        except Exception as e:  # not on Colab, or the user declined
-            print(f"[!] Google Drive 没挂上（{type(e).__name__}）：结果只存在本地 {path}，runtime 重置后会丢。")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _mount_drive(drive, mountpoint: str) -> None:
+    import time
+
+    # A previous run can leave files in an unmounted /content/drive (e.g. writes after the mount dropped);
+    # drive.mount then fails with "Mountpoint must not already contain files". Move them aside and retry.
+    if os.path.isdir(mountpoint) and os.listdir(mountpoint):
+        aside = f"{mountpoint}_local_{int(time.time())}"
+        os.rename(mountpoint, aside)
+        print(f"[!] {mountpoint} had local files but was not mounted; moved them to {aside}")
+    try:
+        drive.mount(mountpoint)
+    except Exception as e:
+        raise RuntimeError(
+            f"Google Drive 挂载失败：{type(e).__name__}: {e}\n"
+            "常见原因：授权弹窗被关掉 / 超时，或者授权页上没勾选 Google Drive 权限。重跑这一格，在弹窗里选账号并"
+            "允许全部权限。\n不用 Drive（检查点只存在本地，runtime 重置后会丢）：把 USE_DRIVE 设为 False 再重跑。"
+        ) from e
 
 
 class StageCache:
@@ -958,6 +984,14 @@ def end_runtime(disconnect: bool = True, wait_seconds: int = 60) -> None:
 # ---------------------------------------------------------------- subprocess helpers (data prep, decontam)
 
 
+def read_jsonl(path) -> list[dict]:
+    """Read a JSONL file line by line. Do not use str.splitlines(): it also splits on U+2028 / U+2029 /
+    U+0085, which json.dumps(..., ensure_ascii=False) leaves unescaped inside strings, so a row whose
+    text contains one gets cut in half (JSONDecodeError: Unterminated string)."""
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 def run_script(args: list[str], show_tail: int = 30) -> subprocess.CompletedProcess:
     """Run a repo script with the current Python and print its output (a plain child process's output
     does not show up in a Colab cell otherwise). Raises if the script fails."""
@@ -1014,8 +1048,7 @@ def prepare_sft_sources(sources: list[dict], tokenizer: str, max_tokens: int, sc
             args.append("--strip-think")
         print(f"== {src['dataset']} (n={n})")
         run_script(args)
-        for line in out.read_text().splitlines():
-            r = json.loads(line)
+        for r in read_jsonl(out):
             rows.append({"messages": r["prompt"] + r["completion"], "source": r.get("source"),
                          "dataset": src["dataset"], "n_tokens": r.get("n_tokens"), "part": src.get("part")})
     return rows

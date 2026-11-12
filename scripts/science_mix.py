@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from recipe_utils import LETTERS, format_mcq  # noqa: E402
+from recipe_utils import LETTERS, format_mcq, read_jsonl  # noqa: E402
 
 DATASET = "MegaScience/MegaScience"
 SRC_MCQ, SRC_TEXTBOOK, SRC_NATURAL = "nemotro_science", "textbook_reasoning", "natural_reasoning"  # spelling as in the dataset
@@ -175,7 +175,7 @@ def pool_row(r: dict) -> dict:
 
 def load_mcq_pool(path: str, n: int | None = None, seed: int = 0) -> list[dict]:
     """Read a pool written by this script (rl_mcq.jsonl / val_mcq.jsonl), shuffled with a fixed seed."""
-    rows = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    rows = read_jsonl(path)
     random.Random(seed).shuffle(rows)
     return rows[:n] if n else rows
 

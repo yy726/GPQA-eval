@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import random
 import sys
 from pathlib import Path
@@ -443,7 +444,7 @@ def test_persist_dir_falls_back_to_local_outside_colab(tmp_path, monkeypatch, ca
     monkeypatch.chdir(tmp_path)
     path = ru.persist_dir("S1_quick", use_drive=True)
     assert path == "outputs/S1_quick" and (tmp_path / path).is_dir()
-    assert "没挂上" in capsys.readouterr().out
+    assert "not on Colab" in capsys.readouterr().out
     assert ru.persist_dir("S1_quick", use_drive=False) == "outputs/S1_quick"
 
 
@@ -489,3 +490,32 @@ def test_stage_cache_stops_resuming_when_the_settings_change(tmp_path, capsys):
     assert not other.has("grpo_s0") and "init_model" in capsys.readouterr().out
     again = ru.StageCache(str(tmp_path))                                           # the new settings are now the stored ones
     assert again.check_config({"init_model": "u/d1-dpo", "lr": 1e-5}) is True
+
+
+def test_read_jsonl_keeps_unicode_line_separators(tmp_path):
+    rows = [{"text": "a b c\x85d"}, {"text": "plain"}]
+    path = tmp_path / "x.jsonl"
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    assert ru.read_jsonl(path) == rows
+
+
+class _FakeDrive:
+    def __init__(self, fail=False):
+        self.fail, self.calls = fail, []
+
+    def mount(self, mountpoint):
+        self.calls.append(mountpoint)
+        if self.fail:
+            raise ValueError("mount failed")
+
+
+def test_mount_drive_moves_stale_files_and_raises_on_failure(tmp_path):
+    mp = tmp_path / "drive"
+    mp.mkdir()
+    (mp / "leftover.txt").write_text("x")
+    ok = _FakeDrive()
+    ru._mount_drive(ok, str(mp))
+    assert ok.calls == [str(mp)] and not mp.exists()
+    assert any(p.name.startswith("drive_local_") for p in tmp_path.iterdir())
+    with pytest.raises(RuntimeError, match="USE_DRIVE"):
+        ru._mount_drive(_FakeDrive(fail=True), str(tmp_path / "drive2"))
