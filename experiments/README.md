@@ -5,7 +5,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `notebooks/15_sft_checkpoint.ipynb` | **先跑这个**：共享 SFT 检查点 S1，只训练一次（约 4 小时），推到 HF 私有仓库；11 / 12 / 13 都从它开始。数据配方 = MegaScience 教材题 + GPQA 题面的 4 选 1 科学题 + Dolci 科学 / 数学（依据见 `experiments/DATASETS.md`）；检查点存 Google Drive，可续训 |
+| `notebooks/15_sft_checkpoint.ipynb` | **先跑这个**：共享 SFT 检查点 S1，只训练一次（约 4 小时），推到 HF 私有仓库；11 / 12 / 13 都从它开始。`VARIANT="think"` 是思维链消融（从 S1 接着训练，评测预算 16384）。数据配方 = MegaScience 教材题 + GPQA 题面的 4 选 1 科学题 + Dolci 科学 / 数学（依据见 `experiments/DATASETS.md`）；检查点存 Google Drive，可续训 |
 | `notebooks/11_sft_grpo_unsloth.ipynb` | **GRPO**（默认 `INIT_MODEL="auto"` = S1）：留出的 4 选 1 科学题 + MMLU-Pro STEM + Dr.SCI 数值题，通过率预筛 + 两段课程 + 软超长惩罚，每步 16 题 × 8，留出验证集；GPQA 快速评测每题采样 8 次 + 阶段间配对比较。`RUN_SFT=True` 可以重现 X1b 的旧流程 |
 | `notebooks/12_dpo_unsloth.ipynb` | **DPO**（从 S1 开始）：OLMo 3 公开的 Dolci-Instruct-DPO 的科学 / 数学偏好对 + 在留出科学题上自己采样的"答对 vs 答错"；长度归一化 DPO；合并后推到 HF，可以接着做 GRPO |
 | `notebooks/13_distill_gkd.ipynb` | **知识蒸馏（GKD）**：Qwen3-32B（4-bit）→ S1，离线对齐老师的逐 token 分布。**只作参考，不参与排名** |
@@ -53,7 +53,7 @@ Qwen 官方后训练版的 GPQA Diamond（Qwen3 技术报告；随机猜 = 25%�
 - `scores.gpqa_diamond.mean`：主指标（1 个 seed 时噪声约 ±3 分，两次评测之差约 ±5 分；0.6B 接近 25% 的随机水平是正常的）。
 - notebook 11–13 的快速评测：`acc_flex` 是每题采样 k 次的平均，`acc_flex_se` 是标准误；**比较两个阶段只看汇总里的配对差值**（`compare`：差 ± 标准误，|z| < 2 = 看不出差别）。X1b 里单样本的 "SFT 37.4 → GRPO 30.8（Diamond）" 就是噪声（见 `results.md`）。
 - `diagnostics.*.flexible-extract.extract_rate`：能提取出答案字母的比例。低说明是**格式问题**，SFT/GRPO 很容易改善。
-- `diagnostics.*.length.truncation_rate`：打满生成预算（现为 8192 token；第一轮实验时是 4096）的比例。高说明**思维链太长被截断**，可以考虑去掉 `<think>`（E3）或筛选更短的样本。
+- `diagnostics.*.length.truncation_rate`：打满生成预算（排行榜是 8192 token；第一轮实验时是 4096；参考分支的 notebook 11–15 可以用 `GEN_BUDGET=16384`，这时另报 `acc_flex_at_8192`）的比例。高说明**思维链太长被截断**，可以考虑去掉 `<think>`（E3）或筛选更短的样本。
 - `pred_letter_dist`：如果几乎全是同一个字母，说明模型在"猜"，分数没有意义。
 
 每次运行后，把 notebook 最后打印的 JSON 贴给 Claude，结果汇总到 [results.md](results.md)。

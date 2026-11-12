@@ -85,6 +85,7 @@ RESPONSE_PARTS = {
     "chatml": ("<|im_start|>user\n", "<|im_start|>assistant\n"),
     "plain": ("### Question:\n", "### Response:\n"),
 }
+LEADERBOARD_BUDGET = 8192   # max_gen_toks of the locked eval on main; the reference branch may generate more
 GLITCH_TOKEN = "\tNdrFc"   # id 70564 in the Qwen3 vocabulary; what X1 emitted instead of <|im_end|>
 STOP_STRS = ["<|im_end|>", "<|im_start|>", "<|endoftext|>"]
 
@@ -290,22 +291,37 @@ def aggregate(scores: list[dict]) -> dict:
     }
 
 
-def score_vllm_outputs(outputs, golds: list[str], detail: bool = False):
+def score_vllm_outputs(outputs, golds: list[str], detail: bool = False, cap_tokens: int | None = None, decode=None):
     """Aggregate a list of vLLM RequestOutput against gold letters.
 
     Every sample of every prompt is scored (SamplingParams(n=k) gives k per prompt), so acc_flex is avg@k.
     Extra keys: n = questions, samples = k, acc_flex_se = standard error of acc_flex over questions
     (percentage points). detail=True also returns the per-question fraction correct (kept in memory only).
+
+    cap_tokens + decode(token_ids) -> str: also score every answer as if generation had stopped after
+    cap_tokens tokens (the text is cut there). Used when the reference branch evaluates with a larger budget
+    than the leaderboard: acc_flex_at_<cap> is what the same answers would score under the leaderboard budget,
+    over_<cap>_rate the share of answers that needed more.
     """
-    scores, per_q = [], []
+    scores, per_q, capped, over = [], [], [], 0
     for o, gold in zip(outputs, golds):
         s = [score_completion(c.text, gold, c.finish_reason, len(c.token_ids)) for c in o.outputs]
         scores.extend(s)
         per_q.append(sum(x["flex"] for x in s) / max(1, len(s)))
+        if cap_tokens and decode is not None:
+            for c, x in zip(o.outputs, s):
+                if len(c.token_ids) > cap_tokens:
+                    over += 1
+                    capped.append(score_completion(decode(list(c.token_ids[:cap_tokens])), gold, "length", cap_tokens)["flex"])
+                else:
+                    capped.append(x["flex"])
     agg = aggregate(scores)
     agg["n"] = len(per_q)
     agg["samples"] = max((len(o.outputs) for o in outputs), default=0)
     agg["acc_flex_se"] = round(100 * statistics.pstdev(per_q) / math.sqrt(len(per_q)), 1) if len(per_q) > 1 else None
+    if capped:
+        agg[f"acc_flex_at_{cap_tokens}"] = round(100 * sum(capped) / len(capped), 1)
+        agg[f"over_{cap_tokens}_rate"] = round(100 * over / len(capped), 1)
     return (agg, per_q) if detail else agg
 
 
@@ -334,8 +350,10 @@ class QuickEval:
     """
 
     def __init__(self, sets: dict, max_tokens: int, samples: int = 1, stop_ids=(), stop=tuple(STOP_STRS),
-                 temperature: float = 0.6, top_p: float = 0.95, seed: int = 0):
+                 temperature: float = 0.6, top_p: float = 0.95, seed: int = 0, cap_tokens: int | None = None, decode=None):
         self.sets = sets
+        # leaderboard budget, reported next to the main score when this eval generates more than that
+        self.cap_tokens, self.decode = (cap_tokens, decode) if cap_tokens and cap_tokens < max_tokens else (None, None)
         self.max_tokens, self.samples = max_tokens, samples
         self.stop_ids, self.stop = list(stop_ids), list(stop)
         self.temperature, self.top_p, self.seed = temperature, top_p, seed
@@ -344,7 +362,8 @@ class QuickEval:
         self.comparisons: dict = {}
 
     @classmethod
-    def from_gpqa(cls, tokenizer, configs, eval_n=None, max_tokens: int = 8192, max_model_len: int | None = None, **kw):
+    def from_gpqa(cls, tokenizer, configs, eval_n=None, max_tokens: int = 8192, max_model_len: int | None = None,
+                  leaderboard_budget: int = LEADERBOARD_BUDGET, **kw):
         sets, longest = {}, 0
         for cfg in configs:
             rows = [(chat_prompt(tokenizer, p), g, k) for p, g, k in build_gpqa_keyed(cfg, eval_n)]
@@ -353,6 +372,10 @@ class QuickEval:
         if max_model_len is not None and max_tokens > max_model_len - longest - 8:
             max_tokens = max_model_len - longest - 8
             print(f"[!] eval max_tokens clamped to {max_tokens} to fit max_model_len={max_model_len}")
+        if max_tokens > leaderboard_budget:
+            kw.update(cap_tokens=leaderboard_budget, decode=lambda ids: tokenizer.decode(ids, skip_special_tokens=True))
+            print(f"[i] eval budget {max_tokens} > leaderboard budget {leaderboard_budget}: "
+                  f"also reporting acc_flex_at_{leaderboard_budget} (answers cut at the leaderboard budget)")
         return cls(sets, max_tokens, **kw)
 
     def sampling_kwargs(self, samples: int | None = None) -> dict:
@@ -366,7 +389,8 @@ class QuickEval:
         for cfg, rows in self.sets.items():
             t0 = time.time()
             outs = generate([t for t, _, _ in rows], self.sampling_kwargs(samples))
-            r, per_q = score_vllm_outputs(outs, [g for _, g, _ in rows], detail=True)
+            r, per_q = score_vllm_outputs(outs, [g for _, g, _ in rows], detail=True, cap_tokens=self.cap_tokens,
+                                          decode=self.decode)
             if cfg == "gpqa_main" and "gpqa_diamond" in self.sets:
                 sub = {k for _, _, k in self.sets["gpqa_diamond"]}
                 inside = [x for x, (_, _, k) in zip(per_q, rows) if k in sub]
@@ -755,7 +779,7 @@ def log_eval(wandb, results: dict, tag: str) -> None:
 
 
 TABLE_COLS = ["stage", "set", "acc_flex", "acc_flex_se", "samples", "acc_strict", "extract_rate", "truncation_rate",
-              "mean_tokens"]
+              "mean_tokens", f"acc_flex_at_{LEADERBOARD_BUDGET}"]
 
 
 def print_table(results: dict) -> list[list]:

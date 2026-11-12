@@ -371,3 +371,24 @@ def test_sft_repo_name_and_auto_init_model():
     assert ru.resolve_init_model("auto", "alice", "unsloth/Qwen3-4B-Base") == "alice/qwen3-4b-s1-sft"
     assert ru.resolve_init_model(None, "alice", "x/Qwen3-4B-Base") is None
     assert ru.resolve_init_model("/content/drive/m", "alice", "x/Qwen3-4B-Base") == "/content/drive/m"
+
+
+def test_score_under_the_leaderboard_cap():
+    from types import SimpleNamespace
+
+    def out(text, n_tokens):
+        return SimpleNamespace(outputs=[SimpleNamespace(text=text, finish_reason="stop", token_ids=list(range(n_tokens)))])
+
+    # the long answer first mentions (B) and only reaches the right letter after the cap
+    outs = [out("thinking ... (B) ... The answer is (A).", 30), out("The answer is (C).", 5)]
+    decode = lambda ids: "thinking ... (B) ..." if len(ids) == 10 else "?"
+    agg = ru.score_vllm_outputs(outs, ["A", "C"], cap_tokens=10, decode=decode)
+    assert agg["acc_flex"] == 100.0 and agg["acc_flex_at_10"] == 50.0 and agg["over_10_rate"] == 50.0
+    assert "acc_flex_at_10" not in ru.score_vllm_outputs(outs, ["A", "C"])
+
+
+def test_quick_eval_only_caps_when_the_budget_is_larger():
+    sets = {"gpqa_diamond": [("p", "A", "k")]}
+    assert ru.QuickEval(sets, max_tokens=8192, cap_tokens=8192, decode=str).cap_tokens is None
+    assert ru.QuickEval(sets, max_tokens=16384, cap_tokens=8192, decode=str).cap_tokens == 8192
+    assert ru.LEADERBOARD_BUDGET == 8192 and ru.TABLE_COLS[-1] == "acc_flex_at_8192"

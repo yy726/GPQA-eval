@@ -157,3 +157,12 @@ def test_select_per_part_respects_targets_and_prefers_new_content():
     assert info["a"] == {"pool": 3, "target": 2, "selected": 2, "tokens": 20} and info["b"]["selected"] == 2
     rnd, _ = sc.select_per_part(rows, {"a": 2}, method="random", seed=1)
     assert len(rnd) == 2
+
+
+def test_think_wrap_keeps_the_extracted_answer():
+    r = sm.mcq_row(mega_row())
+    w = sm.think_wrap(r["completion"])
+    assert w.startswith("<think>\nStep 1 ...") and w.endswith("\n</think>\n\nThe answer is (A).")
+    score = ru.score_completion(w, "A")
+    assert score["strict"] and score["flex"]
+    assert sm.think_wrap("no final sentence") == "no final sentence"

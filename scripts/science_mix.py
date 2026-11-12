@@ -84,6 +84,18 @@ def gpqa_style_solution(answer: str, letter: str) -> str:
     return f"{body}\n\nThe answer is ({letter})."
 
 
+def think_wrap(completion: str) -> str:
+    """'<solution>\n\nThe answer is (X).' -> '<think>\n<solution>\n</think>\n\nThe answer is (X).'
+
+    For the thinking ablation: the MCQ rows keep the GPQA prompt and the final sentence the eval extracts, but
+    the reasoning sits in the same <think>...</think> block as the Dolci-Think traces, so the model learns that
+    a GPQA prompt is answered by thinking first and then stating the letter."""
+    m = re.search(r"\n\nThe answer is \(([A-J])\)\.\s*$", completion)
+    if not m:
+        return completion
+    return f"<think>\n{completion[:m.start()].strip()}\n</think>\n\nThe answer is ({m.group(1)})."
+
+
 def question_bucket(question: str) -> float:
     """Stable number in [0, 1) from the question text: decides SFT / RL pool / validation membership."""
     h = hashlib.sha1(" ".join(question.lower().split()).encode()).hexdigest()

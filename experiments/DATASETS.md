@@ -1,6 +1,6 @@
 # 训练数据：配方、依据和候选数据集
 
-GPQA 考的是研究生水平的物理、化学、生物选择题：**知识**（模型里有没有这块内容）和**推理**（能不能在 8192 token 的生成预算内推完）都要。
+GPQA 考的是研究生水平的物理、化学、生物选择题：**知识**（模型里有没有这块内容）和**推理**（能不能在生成预算内推完；排行榜是 8192 token，参考分支的实验可以放宽到 16384）都要。
 
 ## 共享 SFT 检查点 S1 的配方（notebook 15）
 
@@ -20,7 +20,7 @@ GPQA 考的是研究生水平的物理、化学、生物选择题：**知识**�
 | 数据集 | 发现 |
 |---|---|
 | `MegaScience/MegaScience`（125 万；全量统计） | `textbook_reasoning` 65.1 万（数学 42.4 万、医学 8.2 万、生物 5.3 万、物理 4.1 万、化学 3.2 万）；`natural_reasoning` 42.9 万；`nemotro_science` 17.3 万，其中 **4 选 1 的 24,038 条**、10 选 1 的 12.8 万（含人文社科）。4 选 1 题里重写解答和参考答案**一致的 19,366 条（81%）**；正确选项 A/B/C/D = 5352 / 7220 / 6384 / 4955。回答长度（中位数）：选择题 700、物理 505、化学 358、生物 236、natural 1018 token |
-| `allenai/Dolci-Think-SFT-7B`（227 万） | 科学（OpenThoughts3 科学题）约占 5%，回答**中位数 7200 token**（90% 是 `<think>`），≤4k 的 28%、≤6k 的 45%；数学中位数 2 万 token。→ 在 8192 预算和现有算力下不划算，S1 默认不用 |
+| `allenai/Dolci-Think-SFT-7B`（227 万） | 科学（OpenThoughts3 科学题）约占 5%，回答**中位数 7200 token**（90% 是 `<think>`），≤4k 的 28%、≤6k 的 45%；数学中位数 2 万 token。→ SFT、评测、GRPO 都按 token 算钱，S1 不用；单独做思维链消融（notebook 15 `VARIANT="think"`，评测预算 16384） |
 | `allenai/Dolci-Instruct-DPO`（26 万对） | OpenThoughts3 科学题占 **11%（约 2.9 万对）**，chosen 中位数 1130 token、rejected 740；Tulu 数学约 6%。类型：delta learning 47%、LLM 判分 50%。chosen 比 rejected 长的占 74% → 用长度归一化的 DPO |
 | `allenai/Dolci-Think-DPO-7B`（15 万对） | 科学题 chosen 中位数 4660 token（≤2k 的只有 8%），数学 7650 → 太长 |
 | `nvidia/OpenScience`（`OS-Q3-235B-4`） | 4 选 1 科学题 + DeepSeek-R1 的 `<think>` 解答，中位数约 1200 token。和 GPQA 很像，但 MegaScience 的去污染在这个数据集里删掉了 27%，原始版本不建议直接用 |
@@ -96,7 +96,7 @@ python scripts/prepare_dolci_sft.py --dataset MegaScience/TextbookReasoning --ou
 |---|---|---|
 | S1 | 上面的默认配方 | 基线 |
 | S1-nomcq | `MCQ_N = 0`，其余不变 | GPQA 题面的选择题样本贡献多少 |
-| S1-think | `THINK_N = 5000`（Dolci-Think 科学思维链，≤6144 token，约多 1 小时） | 长思维链在 8192 预算下有没有用 |
+| S1think | notebook 15 `VARIANT="think"`：从 S1 接着训练 5000 条 Dolci-Think 科学思维链（≤8192 token）+ 2000 条 `<think>` 格式的选择题（约 2.5 小时，含评测） | 长思考能加多少分；其中多少需要超过 8192 的预算（评测 16384，同时报告按 8192 截断的分数） |
 | X1b | notebook 11 `RUN_SFT=True`（Dolci 科学 / 数学 2 万 + SciQ 格式） | 旧配方：Diamond 37.4 / Main 29.7（单样本） |
 
 ## Dr.SCI 数据集字段（`MiniByte-666/Dr.SCI`，MIT）
