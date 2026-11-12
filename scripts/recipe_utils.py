@@ -382,9 +382,20 @@ class QuickEval:
         return dict(n=samples or self.samples, temperature=self.temperature, top_p=self.top_p,
                     max_tokens=self.max_tokens, seed=self.seed, stop_token_ids=self.stop_ids, stop=self.stop)
 
-    def run(self, tag: str, generate, samples: int | None = None) -> dict:
+    def run(self, tag: str, generate, samples: int | None = None, cache=None) -> dict:
+        """cache: a StageCache. A finished eval with the same settings is read back instead of generated again
+        (the per-question fractions are stored with it, so paired comparisons still work after a resume)."""
         import time
 
+        settings = {"samples": samples or self.samples, "max_tokens": self.max_tokens, "temperature": self.temperature,
+                    "n": {cfg: len(rows) for cfg, rows in self.sets.items()}}
+        if cache is not None and cache.has(f"eval_{tag}"):
+            saved = cache.load(f"eval_{tag}")
+            if saved.get("settings") == settings:
+                self.results[tag], self.per_question[tag] = saved["results"], saved["per_question"]
+                for cfg, r in saved["results"].items():
+                    print(tag, cfg, "(cached)", r)
+                return self.results[tag]
         self.results[tag], self.per_question[tag] = {}, {}
         for cfg, rows in self.sets.items():
             t0 = time.time()
@@ -403,6 +414,9 @@ class QuickEval:
             self.results[tag][cfg] = r
             self.per_question[tag][cfg] = per_q
             print(tag, cfg, r)
+        if cache is not None:
+            cache.save(f"eval_{tag}", {"settings": settings, "results": self.results[tag],
+                                       "per_question": self.per_question[tag]})
         return self.results[tag]
 
     def compare(self, tag_a: str, tag_b: str) -> dict:
@@ -792,6 +806,153 @@ def print_table(results: dict) -> list[list]:
             rows.append(row)
             print(" ".join(f"{str(x):>15s}" for x in row))
     return rows
+
+
+# ---------------------------------------------------------------- re-runnable, resumable notebooks (Colab)
+
+
+def reload_scripts(names=("recipe_utils", "science_mix", "select_coverage")) -> list[str]:
+    """After `git pull` in a running notebook: re-import the helper modules that are already loaded, so edits
+    to scripts/ take effect without restarting the runtime (and without reloading the model)."""
+    import importlib
+
+    done = []
+    for name in names:
+        if name in sys.modules:
+            importlib.reload(sys.modules[name])
+            done.append(name)
+    return done
+
+
+def load_guard(ns: dict, key: tuple, var: str = "model") -> bool:
+    """Should the model-loading cell load the model now?
+
+    True  -> nothing is loaded yet: load it, then set ns["_LOADED_KEY"] = key.
+    False -> the same model is already loaded with the same settings: reuse it. Re-running the cell that
+             creates the in-process vLLM engine a second time is what used to fail (the first engine still
+             holds the GPU memory), forcing a full runtime restart.
+    Raises if a model is loaded with *different* settings: the vLLM engine cannot be rebuilt in the same
+    process, so that case needs Runtime -> Restart session; saying so beats an out-of-memory traceback.
+    """
+    old = ns.get("_LOADED_KEY")
+    if old is None or ns.get(var) is None:
+        return True
+    if tuple(old) == tuple(key):
+        return False
+    raise RuntimeError(
+        f"已经加载了一个模型（{old}），而现在的配置是 {key}。vLLM 引擎不能在同一个进程里换模型 / 换上下文长度："
+        "Runtime → Restart session，然后 Run all。只改训练或数据的配置不需要重启。")
+
+
+def restore_lora(model, path: str | None = None) -> dict:
+    """Put the LoRA weights of an already-loaded PEFT model back to a known state, in place.
+
+    path None: fresh initialisation (A random, B zero), i.e. the base model again.
+    path: the weights saved by model.save_lora(path) / save_pretrained(path).
+    Training cells call this first, so re-running a training cell starts from the same point instead of
+    continuing from whatever the previous run left in memory, and nothing has to be reloaded.
+    """
+    if path:
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+
+        res = set_peft_model_state_dict(model, load_file(os.path.join(path, "adapter_model.safetensors")))
+        return {"loaded": path, "unexpected_keys": len(getattr(res, "unexpected_keys", None) or [])}
+    import torch
+
+    n = 0
+    for module in model.modules():
+        if not (hasattr(module, "lora_A") and hasattr(module, "lora_B")):
+            continue
+        for name in list(module.lora_A.keys()):
+            try:
+                module.reset_lora_parameters(name, True)
+            except Exception:  # PEFT without that method / signature: do the standard init by hand
+                torch.nn.init.kaiming_uniform_(module.lora_A[name].weight, a=math.sqrt(5))
+                torch.nn.init.zeros_(module.lora_B[name].weight)
+            n += 1
+    return {"reset_layers": n}
+
+
+def persist_dir(name: str, use_drive: bool = True, root: str = "/content/drive/MyDrive/gpqa_ckpt") -> str:
+    """Directory for everything that must survive a Colab runtime reset (adapters, checkpoints, stage and
+    eval results): Google Drive when it can be mounted, else ./outputs/<name> (lost with the runtime)."""
+    path = os.path.join("outputs", name)
+    if use_drive:
+        try:
+            from google.colab import drive
+
+            if not os.path.ismount("/content/drive"):
+                drive.mount("/content/drive")
+            path = os.path.join(root, name)
+        except Exception as e:  # not on Colab, or the user declined
+            print(f"[!] Google Drive 没挂上（{type(e).__name__}）：结果只存在本地 {path}，runtime 重置后会丢。")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+class StageCache:
+    """Results of finished stages as small JSON files in the persistent directory.
+
+    A notebook asks `cache.has("grpo_s0")` before an expensive stage and skips it when the result is there, so
+    after a disconnect "Run all" continues where it stopped instead of starting over. enabled=False (RESUME off)
+    ignores what is stored but still writes new results.
+    """
+
+    def __init__(self, directory: str, enabled: bool = True):
+        self.dir, self.enabled = Path(directory), enabled
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def check_config(self, config: dict) -> bool:
+        """Stored stage results only make sense for the settings that produced them. If this run's settings
+        differ from the ones stored next to the results, stop using the stored results (they stay on disk
+        until overwritten) and say so; returns whether resuming is still on."""
+        f = self.dir / "run_config.json"
+        new = json.loads(json.dumps(config, default=str, sort_keys=True))
+        if self.enabled and f.exists():
+            old = json.loads(f.read_text())
+            if old != new:
+                changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+                print(f"[!] 配置和这个目录里已有的阶段结果不一致（{', '.join(changed)}）：旧结果不再使用，所有阶段重新跑。"
+                      "想保留旧结果请换一个 EXP_NAME。")
+                self.enabled = False
+        f.write_text(json.dumps(new, sort_keys=True))
+        return self.enabled
+
+    def path(self, name: str) -> Path:
+        return self.dir / f"stage_{name}.json"
+
+    def has(self, name: str) -> bool:
+        return self.enabled and self.path(name).exists()
+
+    def load(self, name: str):
+        return json.loads(self.path(name).read_text())
+
+    def save(self, name: str, obj) -> None:
+        tmp = self.path(name).with_suffix(".tmp")
+        tmp.write_text(json.dumps(obj, default=str))
+        tmp.replace(self.path(name))  # a half-written file never counts as a finished stage
+
+    def done(self) -> list[str]:
+        return sorted(p.stem[len("stage_"):] for p in self.dir.glob("stage_*.json")) if self.enabled else []
+
+
+def end_runtime(disconnect: bool = True, wait_seconds: int = 60) -> None:
+    """Release the Colab runtime at the end of an unattended run so it stops consuming compute units.
+    Everything worth keeping must already be on Drive / the Hub. No-op outside Colab."""
+    if not disconnect:
+        print("AUTO_DISCONNECT=False：runtime 保持连接（空闲时也在消耗 CU，记得手动断开）。")
+        return
+    try:
+        from google.colab import runtime
+    except Exception:
+        print("not on Colab: nothing to disconnect")
+        return
+    import time
+
+    print(f"全部完成。{wait_seconds} 秒后断开并释放 runtime（不想断开就中断这个格）。")
+    time.sleep(wait_seconds)
+    runtime.unassign()
 
 
 # ---------------------------------------------------------------- subprocess helpers (data prep, decontam)

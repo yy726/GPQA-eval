@@ -392,3 +392,100 @@ def test_quick_eval_only_caps_when_the_budget_is_larger():
     assert ru.QuickEval(sets, max_tokens=8192, cap_tokens=8192, decode=str).cap_tokens is None
     assert ru.QuickEval(sets, max_tokens=16384, cap_tokens=8192, decode=str).cap_tokens == 8192
     assert ru.LEADERBOARD_BUDGET == 8192 and ru.TABLE_COLS[-1] == "acc_flex_at_8192"
+
+
+# ---------------------------------------------------------------- re-runnable / resumable notebook helpers
+
+
+def test_load_guard_reuses_same_model_and_explains_a_changed_one():
+    ns = {}
+    assert ru.load_guard(ns, ("m", 12288, 64)) is True                      # nothing loaded yet
+    ns.update(model=object(), _LOADED_KEY=("m", 12288, 64))
+    assert ru.load_guard(ns, ("m", 12288, 64)) is False                     # same settings: reuse
+    with pytest.raises(RuntimeError, match="Restart session"):
+        ru.load_guard(ns, ("m", 20480, 64))                                 # different context: needs a restart
+    assert ru.load_guard({"_LOADED_KEY": ("m",), "model": None}, ("x",)) is True   # load failed half-way last time
+
+
+def test_stage_cache_roundtrip_and_resume_switch(tmp_path):
+    c = ru.StageCache(str(tmp_path))
+    assert not c.has("grpo_s0") and c.done() == []
+    c.save("grpo_s0", {"steps": 60, "minutes": 31.5})
+    assert c.has("grpo_s0") and c.load("grpo_s0") == {"steps": 60, "minutes": 31.5} and c.done() == ["grpo_s0"]
+    assert not list(tmp_path.glob("*.tmp"))
+    off = ru.StageCache(str(tmp_path), enabled=False)                       # RESUME=False ignores stored results
+    assert not off.has("grpo_s0") and off.done() == []
+    off.save("grpo_s0", {"steps": 1})
+    assert c.load("grpo_s0") == {"steps": 1}
+
+
+def test_quick_eval_reads_a_cached_eval_instead_of_generating(tmp_path, capsys):
+    sets = {"gpqa_diamond": [("p1", "A", "k1"), ("p2", "B", "k2")]}
+    cache = ru.StageCache(str(tmp_path))
+    calls = []
+
+    def generate(texts, kw):
+        calls.append(kw["n"])
+        return [_out(*["The answer is (A)."] * kw["n"]) for _ in texts]
+
+    ev = ru.QuickEval(sets, max_tokens=64, samples=2)
+    first = ev.run("1_sft", generate, cache=cache)
+    ev2 = ru.QuickEval(sets, max_tokens=64, samples=2)                       # a new session after a disconnect
+    again = ev2.run("1_sft", generate, cache=cache)
+    assert calls == [2] and again == first and ev2.per_question["1_sft"]["gpqa_diamond"] == [1.0, 0.0]
+    assert "(cached)" in capsys.readouterr().out
+    ev3 = ru.QuickEval(sets, max_tokens=128, samples=2)                      # different budget: not the same eval
+    ev3.run("1_sft", generate, cache=cache)
+    assert calls == [2, 2]
+
+
+def test_persist_dir_falls_back_to_local_outside_colab(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    path = ru.persist_dir("S1_quick", use_drive=True)
+    assert path == "outputs/S1_quick" and (tmp_path / path).is_dir()
+    assert "没挂上" in capsys.readouterr().out
+    assert ru.persist_dir("S1_quick", use_drive=False) == "outputs/S1_quick"
+
+
+def test_reload_scripts_only_touches_loaded_modules():
+    assert ru.reload_scripts(("recipe_utils", "module_that_is_not_loaded")) == ["recipe_utils"]
+
+
+def test_restore_lora_resets_and_reloads(tmp_path):
+    torch = pytest.importorskip("torch")
+    peft = pytest.importorskip("peft")
+    st = pytest.importorskip("safetensors.torch")
+
+    class Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(8, 8)
+
+        def forward(self, x):
+            return self.proj(x)
+
+    model = peft.get_peft_model(Tiny(), peft.LoraConfig(r=2, lora_alpha=4, target_modules=["proj"]))
+    lora_b = model.base_model.model.proj.lora_B["default"].weight
+    with torch.no_grad():
+        lora_b.fill_(0.5)                                                   # "trained" adapter
+    saved = tmp_path / "adapter"
+    saved.mkdir()
+    st.save_file(peft.get_peft_model_state_dict(model), str(saved / "adapter_model.safetensors"))
+
+    assert ru.restore_lora(model) == {"reset_layers": 1}
+    assert float(lora_b.abs().sum()) == 0.0                                 # B is zero again: the adapter is a no-op
+    info = ru.restore_lora(model, str(saved))
+    assert info["loaded"] == str(saved) and float(lora_b.mean()) == 0.5     # the saved weights are back
+
+
+def test_stage_cache_stops_resuming_when_the_settings_change(tmp_path, capsys):
+    c = ru.StageCache(str(tmp_path))
+    assert c.check_config({"init_model": "u/s1", "lr": 1e-5}) is True
+    c.save("grpo_s0", {"steps": 60})
+    same = ru.StageCache(str(tmp_path))
+    assert same.check_config({"lr": 1e-5, "init_model": "u/s1"}) is True and same.has("grpo_s0")
+    other = ru.StageCache(str(tmp_path))
+    assert other.check_config({"init_model": "u/d1-dpo", "lr": 1e-5}) is False     # a different starting model
+    assert not other.has("grpo_s0") and "init_model" in capsys.readouterr().out
+    again = ru.StageCache(str(tmp_path))                                           # the new settings are now the stored ones
+    assert again.check_config({"init_model": "u/d1-dpo", "lr": 1e-5}) is True
