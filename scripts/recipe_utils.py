@@ -497,8 +497,16 @@ def numeric_match(pred: float | None, gold: float | None, rel_tol: float = 0.01)
     return abs(pred - gold) <= rel_tol * abs(gold)
 
 
-def correctness_score(text: str, answer: str, answer_type: str = "mcq") -> float:
-    """+2 correct, 0 wrong, -1 no answer found. mcq: last '(X)'; numeric: last \\boxed{} within 1%."""
+def correctness_score(text: str, answer: str, answer_type: str = "mcq", truncated: bool = False) -> float:
+    """+2 correct, 0 wrong, -1 no answer found. mcq: last '(X)'; numeric: last \\boxed{} within 1%.
+
+    truncated=True (the rollout ran into the completion cap) scores like "no answer", whatever the text
+    contains. Without this, a rollout that never stops but mentions the right letter somewhere earned
+    +2 - 1 (overlong) = +1, more than a finished wrong answer (0): run R1 learned exactly that, and once every
+    rollout was truncated there was no signal left to recover from (held-out pass rate 42 -> 0).
+    """
+    if truncated:
+        return -1.0
     if answer_type == "numeric":
         boxed = last_boxed(text)
         if boxed is None:
@@ -510,8 +518,10 @@ def correctness_score(text: str, answer: str, answer_type: str = "mcq") -> float
     return 2.0 if found[-1] == answer else 0.0
 
 
-def format_score(text: str, answer_type: str = "mcq", weight: float = 0.5) -> float:
-    """`weight` if the answer is stated exactly once in the expected form."""
+def format_score(text: str, answer_type: str = "mcq", weight: float = 0.5, truncated: bool = False) -> float:
+    """`weight` if the answer is stated exactly once in the expected form (never for a truncated rollout)."""
+    if truncated:
+        return 0.0
     if answer_type == "numeric":
         return weight if len(BOXED_RE.findall(text)) == 1 else 0.0
     return weight if len(STRICT_RE.findall(text)) == 1 else 0.0
@@ -650,6 +660,61 @@ def suggest_completion_cap(stopped_lengths: list[int], preset_cap: int, floor: i
     return max(min(floor, preset_cap), min(preset_cap, cap))
 
 
+class TruncationGuard:
+    """Stop a GRPO stage when rollouts keep running into the completion cap.
+
+    update(clipped_ratio) returns True once the ratio has been >= threshold for `patience` logged steps in a
+    row. In run R1 the ratio went 0.01 -> 0.16 within six steps of stage 1 and reached 1.0 by step 44; from
+    there every step cost 9 minutes and the adapter was unusable. Stopping early costs a few steps instead.
+    """
+
+    def __init__(self, threshold: float = 0.15, patience: int = 3):
+        self.threshold, self.patience = threshold, patience
+        self.streak, self.tripped, self.last = 0, False, None
+
+    def update(self, clipped_ratio) -> bool:
+        if clipped_ratio is None:
+            return self.tripped
+        self.last = float(clipped_ratio)
+        self.streak = self.streak + 1 if self.last >= self.threshold else 0
+        if self.streak >= self.patience:
+            self.tripped = True
+        return self.tripped
+
+
+def truncation_guard_callback(guard: TruncationGuard, key: str = "completions/clipped_ratio"):
+    """A transformers TrainerCallback that ends training when `guard` trips on the logged clipped ratio."""
+    from transformers import TrainerCallback
+
+    class _Callback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and key in logs and guard.update(logs[key]) and not control.should_training_stop:
+                print(f"[!] 截断比例连续 {guard.patience} 步 >= {guard.threshold}（当前 {guard.last:.2f}）：提前结束这一段，"
+                      f"在第 {state.global_step} 步停止。")
+                control.should_training_stop = True
+
+    return _Callback()
+
+
+def stage_accept(val: dict, min_stop_rate: float = 90.0, min_z: float = -2.0) -> tuple[bool, str]:
+    """Should a finished GRPO stage be kept? `val` is its held-out result from pass_stats (+ the paired
+    comparison "vs_<previous>" that rl_val adds).
+
+    Rejected when the model stopped answering properly (stop_rate below min_stop_rate) or when the held-out
+    pass rate dropped significantly against the previous stage (paired z below min_z). A rejected stage is
+    not merged, evaluated or pushed: the notebook goes back to the previous adapter.
+    """
+    if not val:
+        return True, "no held-out validation set"
+    stop = val.get("stop_rate")
+    if stop is not None and stop < min_stop_rate:
+        return False, f"stop_rate {stop} < {min_stop_rate}"
+    for key, cmp in val.items():
+        if key.startswith("vs_") and isinstance(cmp, dict) and cmp.get("z") is not None and cmp["z"] < min_z:
+            return False, f"held-out pass rate dropped {key}: {cmp.get('delta')} points (z={cmp['z']})"
+    return True, "ok"
+
+
 def lora_delta(path_a: str, path_b: str) -> dict:
     """How far adapter b is from adapter a (two save_lora directories): ||b - a|| / ||a|| over all LoRA tensors.
 
@@ -708,6 +773,81 @@ def sft_repo_name(hf_user: str, model_name: str) -> str:
     for suffix in ("-unsloth-bnb-4bit", "-bnb-4bit", "-base"):
         tag = tag.replace(suffix, "")
     return f"{hf_user}/{tag}-s1-sft"
+
+
+HANDOFF_FILE = "handoff.json"
+
+
+def handoff_repo_name(repo: str, mode: str, finished: bool) -> str:
+    """Where notebook 15 pushes: the shared name only for a finished full ("a100") run.
+
+    A quick / medium run goes to "<repo>-quick" / "<repo>-medium", an unfinished full run to "<repo>-partial".
+    Before this, every mode pushed to the same repo: a 60-step quick run created "<user>/qwen3-4b-s1-sft", the
+    full run was cut off before it pushed, and notebook 11 (INIT_MODEL="auto") trained GRPO on the quick model.
+    """
+    if mode != "a100":
+        return f"{repo}-{mode}"
+    return repo if finished else f"{repo}-partial"
+
+
+def write_handoff_meta(repo: str, meta: dict, token: str | None = None) -> None:
+    """Record how a pushed checkpoint was made (mode, steps, finished ...) as handoff.json in the repo / directory."""
+    text = json.dumps(meta, indent=1, default=str)
+    if os.path.isdir(repo):
+        Path(repo, HANDOFF_FILE).write_text(text)
+        return
+    from huggingface_hub import HfApi
+
+    HfApi(token=token).upload_file(path_or_fileobj=text.encode(), path_in_repo=HANDOFF_FILE, repo_id=repo,
+                                   commit_message="handoff record")
+
+
+def read_handoff_meta(repo: str, token: str | None = None) -> dict | None:
+    """handoff.json of a checkpoint (Hub repo id or local directory); None when there is none or it cannot be read."""
+    try:
+        if os.path.isdir(repo):
+            return json.loads(Path(repo, HANDOFF_FILE).read_text())
+        from huggingface_hub import hf_hub_download
+
+        return json.loads(Path(hf_hub_download(repo, HANDOFF_FILE, token=token)).read_text())
+    except Exception:
+        return None
+
+
+def init_model_problem(meta: dict | None) -> str | None:
+    """Why a starting checkpoint should not be trusted for an expensive run, or None when it is a finished full run."""
+    if not meta:
+        return "没有 handoff.json：无法确认这个检查点是哪一次运行推上去的（旧版 notebook 15 的 quick 试跑和正式训练推到同一个仓库）"
+    if meta.get("mode") != "a100":
+        return f"这是 MODE={meta.get('mode')!r} 的试跑检查点（{meta.get('steps')} 步），不是正式训练"
+    if not meta.get("finished"):
+        return f"SFT 没有训完：{meta.get('steps')}/{meta.get('total_steps')} 步"
+    return None
+
+
+def latest_grpo_checkpoint(ckpt_dir: str) -> tuple[str | None, int]:
+    """Newest adapter checkpoint of a GRPO stage and the stage step it belongs to: (path, step) or (None, 0).
+
+    Each (re)start of a stage writes to <ckpt_dir>/from_<steps already done>/checkpoint-<steps in this run>,
+    so the stage step is the sum of the two numbers. Only checkpoints with adapter weights count.
+    """
+    best, best_step = None, 0
+    root = Path(ckpt_dir)
+    if not root.is_dir():
+        return None, 0
+    for run in root.glob("from_*"):
+        try:
+            base = int(run.name.split("_", 1)[1])
+        except ValueError:
+            continue
+        for ck in run.glob("checkpoint-*"):
+            try:
+                step = base + int(ck.name.split("-", 1)[1])
+            except ValueError:
+                continue
+            if step > best_step and (ck / "adapter_model.safetensors").exists():
+                best, best_step = str(ck), step
+    return best, best_step
 
 
 def resolve_init_model(init_model, hf_user: str, model_name: str):

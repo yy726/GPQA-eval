@@ -519,3 +519,66 @@ def test_mount_drive_moves_stale_files_and_raises_on_failure(tmp_path):
     assert any(p.name.startswith("drive_local_") for p in tmp_path.iterdir())
     with pytest.raises(RuntimeError, match="USE_DRIVE"):
         ru._mount_drive(_FakeDrive(fail=True), str(tmp_path / "drive2"))
+
+
+def test_truncated_rollout_earns_no_correctness_or_format_reward():
+    # R1: a rollout that never stopped but contained the right letter scored +2 and beat a finished wrong answer.
+    text = "... so the answer is (D). And furthermore " * 3
+    assert ru.correctness_score(text, "D") == 2.0
+    assert ru.correctness_score(text, "D", truncated=True) == -1.0
+    assert ru.correctness_score("\\boxed{8.85}", "8.85", "numeric", truncated=True) == -1.0
+    assert ru.format_score("The answer is (D).", "mcq", truncated=True) == 0.0
+    cap = 2048
+    truncated_right = ru.correctness_score(text, "D", truncated=True) + ru.soft_overlong_penalty(cap, cap)
+    finished_wrong = ru.correctness_score("The answer is (A).", "D") + ru.format_score("The answer is (A).", "mcq")
+    finished_none = ru.correctness_score("I am not sure.", "D")
+    assert truncated_right < finished_none < finished_wrong  # never stopping is now the worst outcome
+
+
+def test_truncation_guard_trips_after_consecutive_bad_steps():
+    guard = ru.TruncationGuard(threshold=0.15, patience=3)
+    assert [guard.update(x) for x in (0.01, 0.2, 0.3, 0.05, 0.16, 0.2)] == [False] * 6  # the streak was broken
+    assert guard.update(0.4) is True and guard.update(0.0) is True  # stays tripped
+    assert ru.TruncationGuard().update(None) is False
+
+
+def test_stage_accept_rejects_a_collapsed_or_worse_stage():
+    good = {"pass_rate": 42.1, "stop_rate": 99.6, "vs_before_grpo": {"delta": 7.0, "z": 4.09}}
+    assert ru.stage_accept(good) == (True, "ok")
+    collapsed = {"pass_rate": 0.0, "stop_rate": 0.2, "vs_after_s0": {"delta": -42.1, "z": -30.0}}
+    ok, why = ru.stage_accept(collapsed)
+    assert not ok and "stop_rate" in why
+    worse = {"pass_rate": 30.0, "stop_rate": 99.0, "vs_after_s0": {"delta": -12.1, "z": -4.2}}
+    ok, why = ru.stage_accept(worse)
+    assert not ok and "dropped" in why
+    noise = {"pass_rate": 41.0, "stop_rate": 99.0, "vs_after_s0": {"delta": -1.1, "z": -0.6}}
+    assert ru.stage_accept(noise)[0] and ru.stage_accept({})[0]
+
+
+def test_handoff_repo_name_keeps_trial_runs_out_of_the_shared_repo():
+    repo = "alice/qwen3-4b-s1-sft"
+    assert ru.handoff_repo_name(repo, "a100", True) == repo
+    assert ru.handoff_repo_name(repo, "a100", False) == repo + "-partial"
+    assert ru.handoff_repo_name(repo, "quick", True) == repo + "-quick"
+    assert ru.handoff_repo_name(repo, "medium", False) == repo + "-medium"
+
+
+def test_handoff_meta_roundtrip_and_init_model_check(tmp_path):
+    assert ru.read_handoff_meta(str(tmp_path)) is None
+    assert "handoff.json" in ru.init_model_problem(None)
+    ru.write_handoff_meta(str(tmp_path), {"mode": "quick", "steps": 60, "total_steps": 60, "finished": True})
+    meta = ru.read_handoff_meta(str(tmp_path))
+    assert meta["steps"] == 60 and "quick" in ru.init_model_problem(meta)
+    assert "1600/3407" in ru.init_model_problem({"mode": "a100", "steps": 1600, "total_steps": 3407, "finished": False})
+    assert ru.init_model_problem({"mode": "a100", "steps": 3407, "total_steps": 3407, "finished": True}) is None
+
+
+def test_latest_grpo_checkpoint_adds_up_resumed_runs(tmp_path):
+    assert ru.latest_grpo_checkpoint(str(tmp_path / "missing")) == (None, 0)
+    for run, step, with_weights in (("from_0", 10, True), ("from_0", 20, True), ("from_20", 10, True), ("from_20", 20, False)):
+        d = tmp_path / run / f"checkpoint-{step}"
+        d.mkdir(parents=True)
+        if with_weights:
+            (d / "adapter_model.safetensors").write_bytes(b"x")
+    path, step = ru.latest_grpo_checkpoint(str(tmp_path))
+    assert step == 30 and path.endswith("from_20/checkpoint-10")  # the half-written checkpoint-20 is ignored
