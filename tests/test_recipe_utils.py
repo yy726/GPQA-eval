@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -597,3 +598,23 @@ def test_reward_totals_keep_correctness_dominant_and_truncation_last():
     assert total(right, "D", 500) == total(right, "D", cap - cache) == 2.5  # no length pressure inside the budget
     assert total(right, "D", cap - 1) > total(wrong, "D", 100)  # a correct answer beats any wrong one, however long
     assert total(wrong, "D", 100) > total(none, "D", 100) > total(right, "D", cap) == -2.0
+
+
+def test_emergency_checkpoint_is_found_by_resume_and_skips_bad_weights(tmp_path):
+    class Model:
+        def save_lora(self, path):
+            os.makedirs(path)
+            open(os.path.join(path, "adapter_model.safetensors"), "w").close()
+
+    run = tmp_path / "grpo_ckpt_s0" / "from_10"
+    (run / "checkpoint-5").mkdir(parents=True)
+    (run / "checkpoint-5" / "adapter_model.safetensors").touch()
+    ok = lambda m: True
+    assert ru.save_emergency_checkpoint(Model(), str(run), 0, check=ok) is None  # no step finished
+    assert ru.save_emergency_checkpoint(Model(), str(run), 8, check=lambda m: False) is None  # NaN weights
+    assert ru.latest_grpo_checkpoint(str(tmp_path / "grpo_ckpt_s0"))[1] == 15
+    path = ru.save_emergency_checkpoint(Model(), str(run), 8, check=ok)
+    assert path.endswith("from_10/checkpoint-8") and not os.path.exists(path + ".tmp")
+    assert ru.save_emergency_checkpoint(Model(), str(run), 8, check=lambda m: 1 / 0) == path  # already there: untouched
+    # newest first, so a resume can fall back to the one before if the newest does not load
+    assert [step for _, step in ru.list_grpo_checkpoints(str(tmp_path / "grpo_ckpt_s0"))] == [18, 15]

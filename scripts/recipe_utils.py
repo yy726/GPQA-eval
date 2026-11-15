@@ -20,6 +20,7 @@ import math
 import os
 import random
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -825,16 +826,18 @@ def init_model_problem(meta: dict | None) -> str | None:
     return None
 
 
-def latest_grpo_checkpoint(ckpt_dir: str) -> tuple[str | None, int]:
-    """Newest adapter checkpoint of a GRPO stage and the stage step it belongs to: (path, step) or (None, 0).
+def list_grpo_checkpoints(ckpt_dir: str) -> list[tuple[str, int]]:
+    """Adapter checkpoints of a GRPO stage as (path, stage step), newest first.
 
     Each (re)start of a stage writes to <ckpt_dir>/from_<steps already done>/checkpoint-<steps in this run>,
-    so the stage step is the sum of the two numbers. Only checkpoints with adapter weights count.
+    so the stage step is the sum of the two numbers. Only checkpoints with adapter weights count. A resume
+    walks this list: a checkpoint cut short by a runtime that died mid-write fails to load, and the one
+    before it is used instead.
     """
-    best, best_step = None, 0
+    found = []
     root = Path(ckpt_dir)
     if not root.is_dir():
-        return None, 0
+        return found
     for run in root.glob("from_*"):
         try:
             base = int(run.name.split("_", 1)[1])
@@ -845,9 +848,47 @@ def latest_grpo_checkpoint(ckpt_dir: str) -> tuple[str | None, int]:
                 step = base + int(ck.name.split("-", 1)[1])
             except ValueError:
                 continue
-            if step > best_step and (ck / "adapter_model.safetensors").exists():
-                best, best_step = str(ck), step
-    return best, best_step
+            if step > 0 and (ck / "adapter_model.safetensors").exists():
+                found.append((str(ck), step))
+    return sorted(found, key=lambda x: -x[1])
+
+
+def latest_grpo_checkpoint(ckpt_dir: str) -> tuple[str | None, int]:
+    """Newest adapter checkpoint of a GRPO stage and the stage step it belongs to: (path, step) or (None, 0)."""
+    found = list_grpo_checkpoints(ckpt_dir)
+    return found[0] if found else (None, 0)
+
+
+def lora_weights_finite(model) -> bool:
+    """False if any LoRA weight is NaN / inf (a diverged run must not become the checkpoint to resume from)."""
+    import torch
+
+    return all(bool(torch.isfinite(p).all()) for name, p in model.named_parameters() if "lora_" in name)
+
+
+def save_emergency_checkpoint(model, run_dir: str, global_step: int, check=lora_weights_finite) -> str | None:
+    """Save the LoRA weights in memory as <run_dir>/checkpoint-<global_step> when training stops unexpectedly
+    (manual interrupt, out of memory, CUDA error), in the layout list_grpo_checkpoints reads, so the next
+    run continues from the last optimizer step instead of the last periodic save. Returns the path, or None
+    when there is nothing worth saving: no step finished, or the weights are not finite.
+
+    It cannot help when the runtime itself is taken away (Colab disconnect, compute units used up): no code
+    runs then, and only the periodic saves remain.
+    """
+    if global_step <= 0:
+        return None
+    path = os.path.join(run_dir, f"checkpoint-{global_step}")
+    if os.path.exists(os.path.join(path, "adapter_model.safetensors")):
+        return path  # the periodic save already wrote this step
+    if not check(model):
+        print("[!] LoRA weights are not finite: not saved; the last periodic checkpoint stays the newest one")
+        return None
+    tmp = path + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    (getattr(model, "save_lora", None) or model.save_pretrained)(tmp)
+    shutil.rmtree(path, ignore_errors=True)
+    os.replace(tmp, path)  # a half-written folder never carries the name a resume looks for
+    return path
 
 
 def resolve_init_model(init_model, hf_user: str, model_name: str):
