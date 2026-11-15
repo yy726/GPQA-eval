@@ -618,3 +618,13 @@ def test_emergency_checkpoint_is_found_by_resume_and_skips_bad_weights(tmp_path)
     assert ru.save_emergency_checkpoint(Model(), str(run), 8, check=lambda m: 1 / 0) == path  # already there: untouched
     # newest first, so a resume can fall back to the one before if the newest does not load
     assert [step for _, step in ru.list_grpo_checkpoints(str(tmp_path / "grpo_ckpt_s0"))] == [18, 15]
+
+
+def test_stop_checks_are_relative_to_the_starting_model():
+    val = {"stop_rate": 86.0}
+    assert ru.stage_accept(val)[0] is False  # absolute floor of 90
+    assert ru.stage_accept(val, baseline_stop_rate=99.9)[0] is False  # started at 99.9: a real drop
+    assert ru.stage_accept(val, baseline_stop_rate=88.0)[0] is True  # started at 88: floor is 83
+    assert ru.stage_accept({"stop_rate": 82.0}, baseline_stop_rate=88.0)[0] is False
+    assert ru.clip_stop_threshold(0.15, None) == 0.15 and ru.clip_stop_threshold(0.15, 99.9) == 0.15
+    assert ru.clip_stop_threshold(0.15, 88.0) == 0.22

@@ -661,6 +661,14 @@ def suggest_completion_cap(stopped_lengths: list[int], preset_cap: int, floor: i
     return max(min(floor, preset_cap), min(preset_cap, cap))
 
 
+def clip_stop_threshold(base: float, baseline_stop_rate: float | None, margin: float = 0.10) -> float:
+    """Clipped-ratio threshold for TruncationGuard: `base`, or the starting model's own share of rollouts that
+    do not stop (100 - baseline_stop_rate, in percent) plus `margin` when that is higher."""
+    if baseline_stop_rate is None:
+        return base
+    return round(max(base, (100.0 - baseline_stop_rate) / 100.0 + margin), 3)
+
+
 class TruncationGuard:
     """Stop a GRPO stage when rollouts keep running into the completion cap.
 
@@ -697,19 +705,26 @@ def truncation_guard_callback(guard: TruncationGuard, key: str = "completions/cl
     return _Callback()
 
 
-def stage_accept(val: dict, min_stop_rate: float = 90.0, min_z: float = -2.0) -> tuple[bool, str]:
+def stage_accept(val: dict, min_stop_rate: float = 90.0, min_z: float = -2.0,
+                 baseline_stop_rate: float | None = None, stop_tolerance: float = 5.0) -> tuple[bool, str]:
     """Should a finished GRPO stage be kept? `val` is its held-out result from pass_stats (+ the paired
     comparison "vs_<previous>" that rl_val adds).
 
-    Rejected when the model stopped answering properly (stop_rate below min_stop_rate) or when the held-out
+    Rejected when the model stopped answering properly (stop_rate below the floor) or when the held-out
     pass rate dropped significantly against the previous stage (paired z below min_z). A rejected stage is
     not merged, evaluated or pushed: the notebook goes back to the previous adapter.
+
+    The floor is min_stop_rate, lowered to baseline_stop_rate - stop_tolerance when the starting model
+    itself stops less often than that: a stage must not be thrown away for a stop rate it started with.
     """
     if not val:
         return True, "no held-out validation set"
+    floor = min_stop_rate
+    if baseline_stop_rate is not None:
+        floor = min(min_stop_rate, baseline_stop_rate - stop_tolerance)
     stop = val.get("stop_rate")
-    if stop is not None and stop < min_stop_rate:
-        return False, f"stop_rate {stop} < {min_stop_rate}"
+    if stop is not None and stop < floor:
+        return False, f"stop_rate {stop} < {round(floor, 1)}"
     for key, cmp in val.items():
         if key.startswith("vs_") and isinstance(cmp, dict) and cmp.get("z") is not None and cmp["z"] < min_z:
             return False, f"held-out pass rate dropped {key}: {cmp.get('delta')} points (z={cmp['z']})"
