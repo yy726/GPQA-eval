@@ -24,6 +24,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -691,12 +692,21 @@ class TruncationGuard:
         return self.tripped
 
 
-def truncation_guard_callback(guard: TruncationGuard, key: str = "completions/clipped_ratio"):
-    """A transformers TrainerCallback that ends training when `guard` trips on the logged clipped ratio."""
+def truncation_guard_callback(guard: TruncationGuard, key: str = "completions/clipped_ratio", on_step=None):
+    """A transformers TrainerCallback that ends training when `guard` trips on the logged clipped ratio.
+
+    on_step(global_step, logs), when given, is called at every log line (the notebook uses it to write the
+    progress file); an error in it never stops training.
+    """
     from transformers import TrainerCallback
 
     class _Callback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
+            if on_step is not None and logs:
+                try:
+                    on_step(state.global_step, logs)
+                except Exception as e:
+                    print("on_step skipped:", type(e).__name__, e)
             if logs and key in logs and guard.update(logs[key]) and not control.should_training_stop:
                 print(f"[!] 截断比例连续 {guard.patience} 步 >= {guard.threshold}（当前 {guard.last:.2f}）：提前结束这一段，"
                       f"在第 {state.global_step} 步停止。")
@@ -1169,6 +1179,42 @@ def _mount_drive(drive, mountpoint: str) -> None:
             "常见原因：授权弹窗被关掉 / 超时，或者授权页上没勾选 Google Drive 权限。重跑这一格，在弹窗里选账号并"
             "允许全部权限。\n不用 Drive（检查点只存在本地，runtime 重置后会丢）：把 USE_DRIVE 设为 False 再重跑。"
         ) from e
+
+
+def write_progress(directory, phase: str, **info) -> None:
+    """Write <directory>/progress.json: what the run is doing right now and when (UTC).
+
+    When a runtime dies (disconnect, compute units used up) the notebook output often stops earlier than the
+    run did. This file is the record of how far it really got; the next run prints it. Never raises.
+    """
+    try:
+        path = Path(directory) / "progress.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dict(phase=phase, utc=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), **info),
+                                  default=str))
+        tmp.replace(path)
+    except Exception as e:
+        print("progress file not written:", type(e).__name__, e)
+
+
+def read_progress(directory) -> dict | None:
+    """The last thing a previous run wrote with write_progress, or None."""
+    try:
+        return json.loads((Path(directory) / "progress.json").read_text())
+    except Exception:
+        return None
+
+
+def init_eval_now(run_init_eval, has_init_model: bool, run_grpo: bool, after_grpo: bool) -> bool:
+    """Should the GPQA eval of the starting model run at this point of the notebook?
+
+    run_init_eval: True = before training, "after" = after GRPO training (training progress is on disk before
+    the hour of evaluation starts), False = never. With "after" and no GRPO in this run, it runs up front.
+    """
+    if not has_init_model or not run_init_eval:
+        return False
+    late = run_init_eval == "after" and run_grpo
+    return late if after_grpo else not late
 
 
 class StageCache:

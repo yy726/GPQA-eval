@@ -666,3 +666,39 @@ def test_guarded_generate_drops_leftovers_of_an_interrupted_call():
     with pytest.raises(KeyboardInterrupt):
         m.fast_generate(["a", "b", "c"], interrupt=True)
     assert m.fast_generate(["x", "y"]) == ["out:x", "out:y"]
+
+
+def test_progress_file_and_when_the_starting_model_is_evaluated(tmp_path):
+    from recipe_utils import init_eval_now, read_progress, write_progress
+    assert read_progress(tmp_path) is None
+    write_progress(tmp_path, "grpo_s0_train", step=5, of=60)
+    write_progress(tmp_path, "grpo_s0_train", step=6, of=60)
+    p = read_progress(tmp_path)
+    assert (p["phase"], p["step"], p["of"]) == ("grpo_s0_train", 6, 60) and p["utc"]
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["progress.json"]
+    write_progress(tmp_path / "missing" / "dir", "x")                 # must not raise
+
+    # "after": nothing before training, the eval once training is done
+    assert not init_eval_now("after", True, run_grpo=True, after_grpo=False)
+    assert init_eval_now("after", True, run_grpo=True, after_grpo=True)
+    # "after" without a GRPO stage in this run: up front, and not a second time
+    assert init_eval_now("after", True, run_grpo=False, after_grpo=False)
+    assert not init_eval_now("after", True, run_grpo=False, after_grpo=True)
+    # True = before training only; False / no starting model = never
+    assert init_eval_now(True, True, run_grpo=True, after_grpo=False)
+    assert not init_eval_now(True, True, run_grpo=True, after_grpo=True)
+    assert not any(init_eval_now(False, True, True, a) or init_eval_now("after", False, True, a) for a in (False, True))
+
+
+def test_guard_callback_reports_every_step_and_survives_a_failing_hook():
+    pytest.importorskip("transformers")
+    from types import SimpleNamespace
+    from recipe_utils import TruncationGuard, truncation_guard_callback
+    seen = []
+    cb = truncation_guard_callback(TruncationGuard(0.5, 2), on_step=lambda step, logs: seen.append((step, logs["reward"])))
+    control = SimpleNamespace(should_training_stop=False)
+    cb.on_log(None, SimpleNamespace(global_step=3), control, logs={"reward": 1.5, "completions/clipped_ratio": 0.1})
+    assert seen == [(3, 1.5)] and not control.should_training_stop
+    bad = truncation_guard_callback(TruncationGuard(0.5, 1), on_step=lambda step, logs: 1 / 0)
+    bad.on_log(None, SimpleNamespace(global_step=1), control, logs={"completions/clipped_ratio": 0.9})
+    assert control.should_training_stop
