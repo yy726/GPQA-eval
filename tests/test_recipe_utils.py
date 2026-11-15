@@ -68,7 +68,7 @@ def test_aggregate():
               ru.score_completion("(B)", "A", "length", 8)]
     r = ru.aggregate(scores)
     assert r == {"n": 2, "acc_flex": 50.0, "acc_strict": 50.0, "extract_rate": 100.0,
-                 "truncation_rate": 50.0, "mean_tokens": 6, "repeat_rate": 0.0, "answer_then_more": 0.0,
+                 "acc_answered": 50.0, "acc_stopped": 100.0, "acc_truncated": 0.0, "truncation_rate": 50.0, "mean_tokens": 6, "repeat_rate": 0.0, "answer_then_more": 0.0,
                  "glitch_rate": 0.0, "letters": {"A": 1, "B": 1}}
     assert ru.aggregate([]) == {"n": 0}
 
@@ -702,3 +702,71 @@ def test_guard_callback_reports_every_step_and_survives_a_failing_hook():
     bad = truncation_guard_callback(TruncationGuard(0.5, 1), on_step=lambda step, logs: 1 / 0)
     bad.on_log(None, SimpleNamespace(global_step=1), control, logs={"completions/clipped_ratio": 0.9})
     assert control.should_training_stop
+
+
+class _Out:
+    """A vLLM RequestOutput stand-in: one completion per text; finish 'length' for texts ending in '...'."""
+
+    def __init__(self, texts):
+        from types import SimpleNamespace
+        self.outputs = [SimpleNamespace(text=x, finish_reason="length" if x.endswith("...") else "stop",
+                                        token_ids=list(range(len(x.split())))) for x in texts]
+
+
+def test_eval_is_split_by_how_answers_end_and_by_subject():
+    golds = ["A", "B", "C", "D"]
+    groups = ["Physics", "Physics", "Chemistry", "Chemistry"]
+    outs = [_Out(["The answer is (A).", "no letter here"]),         # physics: 1 of 2, one answer without a letter
+            _Out(["The answer is (B).", "The answer is (B)."]),     # physics: 2 of 2
+            _Out(["The answer is (D).", "thinking ..."]),           # chemistry: 0 of 2, one cut off
+            _Out(["(D) and then on and on ...", "The answer is (A)."])]   # chemistry: 1 of 2 (cut off but right)
+    r, per_q = ru.score_vllm_outputs(outs, golds, detail=True, groups=groups)
+    assert per_q == [0.5, 1.0, 0.0, 0.5] and r["acc_flex"] == 50.0
+    assert r["extract_rate"] == 75.0 and r["acc_answered"] == round(100 * 4 / 6, 1)     # 4 right of the 6 with a letter
+    assert r["acc_stopped"] == 50.0 and r["acc_truncated"] == 50.0                      # 3 of 6, 1 of 2
+    assert r["by_domain"] == {"Chemistry": {"n": 2, "acc_flex": 25.0, "extract_rate": 75.0, "truncation_rate": 50.0},
+                              "Physics": {"n": 2, "acc_flex": 75.0, "extract_rate": 75.0, "truncation_rate": 0.0}}
+    assert "by_domain" not in ru.score_vllm_outputs(outs, golds)                         # no labels: nothing added
+    assert ru.aggregate([{"flex": False, "extracted": False, "truncated": False, "n_tokens": 1, "letter": "none"}])["acc_answered"] is None
+
+
+def test_starting_eval_is_taken_from_the_sft_notebook_folder(tmp_path, capsys):
+    import os
+    sets = {"gpqa_diamond": [("p1", "A", "k1"), ("p2", "B", "k2"), ("p3", "C", "k3")]}
+    groups = {"gpqa_diamond": ["Physics", "Physics", "Biology"]}
+    meta = dict(notebook="15_sft_checkpoint", exp="S1", mode="a100", variant="s1", steps=3407, loss_last=0.5548, finished=True)
+    folder = tmp_path / "S1_a100"
+    folder.mkdir()
+    saved = {"settings": {"samples": 4, "max_tokens": 8192, "temperature": 0.6, "n": {"gpqa_diamond": 3, "gpqa_main": 5}},
+             "results": {"gpqa_diamond": {"n": 3, "acc_flex": 50.0, "samples": 4}, "gpqa_main": {"n": 5, "acc_flex": 40.0}},
+             "per_question": {"gpqa_diamond": [1.0, 0.25, 0.25], "gpqa_main": [0.0] * 5}}
+    (folder / "stage_sft.json").write_text(json.dumps({"steps": 3407, "loss_last": 0.5548, "finished": True}))
+    (folder / "stage_eval_1_sft.json").write_text(json.dumps(saved))
+
+    ev = ru.QuickEval(sets, max_tokens=8192, samples=8, groups=groups)
+    assert ru.reuse_sft_eval(ev, "0_init", meta, str(tmp_path))
+    assert ev.samples == 4                                         # later stages use the same number of samples
+    r = ev.results["0_init"]
+    assert list(r) == ["gpqa_diamond"] and r["gpqa_diamond"]["acc_flex"] == 50.0      # only this run's question sets
+    assert r["gpqa_diamond"]["by_domain"] == {"Biology": {"n": 1, "acc_flex": 25.0}, "Physics": {"n": 2, "acc_flex": 62.5}}
+    assert r["gpqa_diamond"]["reused_from"].endswith("stage_eval_1_sft.json")
+    # a later stage is compared with it question by question, overall and per subject
+    ev.run("2_grpo", lambda texts, kw: [_Out(["The answer is (A)."] * kw["n"]), _Out(["The answer is (B)."] * kw["n"]),
+                                         _Out(["The answer is (A)."] * kw["n"])])
+    cmp = ev.compare_all()["0_init -> 2_grpo"]["gpqa_diamond"]
+    assert cmp["delta"] == round(100 * (0.0 + 0.75 - 0.25) / 3, 1)
+    assert cmp["by_domain"]["Physics"]["delta"] == 37.5 and cmp["by_domain"]["Biology"] == {}   # one question: no SE
+    assert "按学科" in capsys.readouterr().out
+
+    keep = ru.QuickEval(sets, max_tokens=8192, samples=8)
+    assert ru.reuse_sft_eval(keep, "0_init", meta, str(tmp_path), keep_samples=True) and keep.samples == 8
+
+    # not reused: another budget, another question count, another training run, an eval older than the training
+    assert not ru.reuse_sft_eval(ru.QuickEval(sets, max_tokens=16384, samples=8), "0_init", meta, str(tmp_path))
+    assert not ru.reuse_sft_eval(ru.QuickEval({"gpqa_diamond": sets["gpqa_diamond"][:2]}, max_tokens=8192), "0_init", meta, str(tmp_path))
+    assert ru.find_sft_eval(dict(meta, steps=60), str(tmp_path))[0] is None
+    assert ru.find_sft_eval(dict(meta, exp="S9"), str(tmp_path))[0] is None
+    assert ru.find_sft_eval(None, str(tmp_path))[0] is None
+    old = (folder / "stage_sft.json").stat().st_mtime - 100
+    os.utime(folder / "stage_eval_1_sft.json", (old, old))
+    assert ru.find_sft_eval(meta, str(tmp_path))[0] is None

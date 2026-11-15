@@ -153,15 +153,21 @@ def question_key(question: str) -> str:
     return hashlib.sha1(" ".join(clean(question).lower().split()).encode()).hexdigest()[:16]
 
 
-def build_gpqa_keyed(config: str, n: int | None = None) -> list[tuple[str, str, str]]:
-    """[(prompt, gold letter, question key)] for a GPQA config (gpqa_diamond / gpqa_main). Gated: needs HF login."""
+GPQA_DOMAIN_COLUMN = "High-level domain"   # Physics / Chemistry / Biology
+
+
+def build_gpqa_keyed(config: str, n: int | None = None, with_domain: bool = False) -> list[tuple]:
+    """[(prompt, gold letter, question key)] for a GPQA config (gpqa_diamond / gpqa_main). Gated: needs HF login.
+    with_domain=True appends the question's subject ("Physics" / "Chemistry" / "Biology", "unknown" if the
+    column is missing) as a fourth field; it is only used to split aggregate scores by subject."""
     from datasets import load_dataset
 
     ds = load_dataset("Idavidrein/gpqa", config, split="train")
     rows = []
     for i, d in enumerate(ds):
         q, choices, letter = gpqa_choices(d, i)
-        rows.append((format_mcq(q, choices), letter, question_key(q)))
+        row = (format_mcq(q, choices), letter, question_key(q))
+        rows.append(row + (str(d.get(GPQA_DOMAIN_COLUMN) or "unknown").strip(),) if with_domain else row)
     return rows[:n] if n else rows
 
 
@@ -279,11 +285,20 @@ def aggregate(scores: list[dict]) -> dict:
     def pct(key):
         return round(100 * sum(bool(s.get(key)) for s in scores) / n, 1)
 
+    def acc_where(keep):
+        part = [s for s in scores if keep(s)]
+        return round(100 * sum(bool(s.get("flex")) for s in part) / len(part), 1) if part else None
+
     return {
         "n": n,
         "acc_flex": pct("flex"),
         "acc_strict": pct("strict"),
         "extract_rate": pct("extracted"),
+        # where the points are lost: accuracy among answers that contain a letter (the reasoning itself),
+        # among answers that ended by themselves, and among answers cut off at the budget
+        "acc_answered": acc_where(lambda s: s.get("extracted")),
+        "acc_stopped": acc_where(lambda s: not s.get("truncated")),
+        "acc_truncated": acc_where(lambda s: s.get("truncated")),
         "truncation_rate": pct("truncated"),
         "mean_tokens": round(statistics.fmean(s["n_tokens"] for s in scores)),
         "repeat_rate": pct("repeat"),
@@ -293,7 +308,19 @@ def aggregate(scores: list[dict]) -> dict:
     }
 
 
-def score_vllm_outputs(outputs, golds: list[str], detail: bool = False, cap_tokens: int | None = None, decode=None):
+def group_means(per_q: list[float], groups: list[str] | None) -> dict:
+    """{group: {"n": questions, "acc_flex": mean per-question accuracy in points}} for per-question fractions."""
+    if not groups or len(groups) != len(per_q):
+        return {}
+    out = {}
+    for g in sorted(set(groups)):
+        part = [x for x, name in zip(per_q, groups) if name == g]
+        out[g] = {"n": len(part), "acc_flex": round(100 * statistics.fmean(part), 1)}
+    return out
+
+
+def score_vllm_outputs(outputs, golds: list[str], detail: bool = False, cap_tokens: int | None = None, decode=None,
+                       groups: list[str] | None = None):
     """Aggregate a list of vLLM RequestOutput against gold letters.
 
     Every sample of every prompt is scored (SamplingParams(n=k) gives k per prompt), so acc_flex is avg@k.
@@ -304,11 +331,16 @@ def score_vllm_outputs(outputs, golds: list[str], detail: bool = False, cap_toke
     cap_tokens tokens (the text is cut there). Used when the reference branch evaluates with a larger budget
     than the leaderboard: acc_flex_at_<cap> is what the same answers would score under the leaderboard budget,
     over_<cap>_rate the share of answers that needed more.
+
+    groups: one label per question (GPQA subject). Adds by_domain = {label: {n, acc_flex, extract_rate,
+    truncation_rate}}, so it is visible which subject loses points and whether it loses them to wrong
+    answers or to answers that never finish.
     """
-    scores, per_q, capped, over = [], [], [], 0
+    scores, per_q, capped, over, per_q_scores = [], [], [], 0, []
     for o, gold in zip(outputs, golds):
         s = [score_completion(c.text, gold, c.finish_reason, len(c.token_ids)) for c in o.outputs]
         scores.extend(s)
+        per_q_scores.append(s)
         per_q.append(sum(x["flex"] for x in s) / max(1, len(s)))
         if cap_tokens and decode is not None:
             for c, x in zip(o.outputs, s):
@@ -324,6 +356,14 @@ def score_vllm_outputs(outputs, golds: list[str], detail: bool = False, cap_toke
     if capped:
         agg[f"acc_flex_at_{cap_tokens}"] = round(100 * sum(capped) / len(capped), 1)
         agg[f"over_{cap_tokens}_rate"] = round(100 * over / len(capped), 1)
+    by_domain = group_means(per_q, groups)
+    for g, d in by_domain.items():
+        part = [x for s, name in zip(per_q_scores, groups) if name == g for x in s]
+        if part:
+            d["extract_rate"] = round(100 * sum(x["extracted"] for x in part) / len(part), 1)
+            d["truncation_rate"] = round(100 * sum(x["truncated"] for x in part) / len(part), 1)
+    if by_domain:
+        agg["by_domain"] = by_domain
     return (agg, per_q) if detail else agg
 
 
@@ -352,8 +392,10 @@ class QuickEval:
     """
 
     def __init__(self, sets: dict, max_tokens: int, samples: int = 1, stop_ids=(), stop=tuple(STOP_STRS),
-                 temperature: float = 0.6, top_p: float = 0.95, seed: int = 0, cap_tokens: int | None = None, decode=None):
+                 temperature: float = 0.6, top_p: float = 0.95, seed: int = 0, cap_tokens: int | None = None, decode=None,
+                 groups: dict | None = None):
         self.sets = sets
+        self.groups = groups or {}   # {config: [subject of each question]}: scores are also reported per subject
         # leaderboard budget, reported next to the main score when this eval generates more than that
         self.cap_tokens, self.decode = (cap_tokens, decode) if cap_tokens and cap_tokens < max_tokens else (None, None)
         self.max_tokens, self.samples = max_tokens, samples
@@ -366,11 +408,14 @@ class QuickEval:
     @classmethod
     def from_gpqa(cls, tokenizer, configs, eval_n=None, max_tokens: int = 8192, max_model_len: int | None = None,
                   leaderboard_budget: int = LEADERBOARD_BUDGET, **kw):
-        sets, longest = {}, 0
+        sets, groups, longest = {}, {}, 0
         for cfg in configs:
-            rows = [(chat_prompt(tokenizer, p), g, k) for p, g, k in build_gpqa_keyed(cfg, eval_n)]
+            keyed = build_gpqa_keyed(cfg, eval_n, with_domain=True)
+            rows = [(chat_prompt(tokenizer, p), g, k) for p, g, k, _ in keyed]
             longest = max([longest] + [len(tokenizer(t, add_special_tokens=False)["input_ids"]) for t, _, _ in rows])
             sets[cfg] = rows
+            groups[cfg] = [d for _, _, _, d in keyed]
+        kw.setdefault("groups", groups)
         if max_model_len is not None and max_tokens > max_model_len - longest - 8:
             max_tokens = max_model_len - longest - 8
             print(f"[!] eval max_tokens clamped to {max_tokens} to fit max_model_len={max_model_len}")
@@ -403,7 +448,7 @@ class QuickEval:
             t0 = time.time()
             outs = generate([t for t, _, _ in rows], self.sampling_kwargs(samples))
             r, per_q = score_vllm_outputs(outs, [g for _, g, _ in rows], detail=True, cap_tokens=self.cap_tokens,
-                                          decode=self.decode)
+                                          decode=self.decode, groups=self.groups.get(cfg))
             if cfg == "gpqa_main" and "gpqa_diamond" in self.sets:
                 sub = {k for _, _, k in self.sets["gpqa_diamond"]}
                 inside = [x for x, (_, _, k) in zip(per_q, rows) if k in sub]
@@ -416,10 +461,39 @@ class QuickEval:
             self.results[tag][cfg] = r
             self.per_question[tag][cfg] = per_q
             print(tag, cfg, r)
+            print_breakdown(tag, cfg, r)
         if cache is not None:
             cache.save(f"eval_{tag}", {"settings": settings, "results": self.results[tag],
                                        "per_question": self.per_question[tag]})
         return self.results[tag]
+
+    def adopt(self, tag: str, saved: dict, source: str = "") -> bool:
+        """Use an eval that was already made (a saved "eval_<tag>" of another run) as stage `tag` here instead
+        of generating it again. Accepted only when it covers every question set of this eval with the same
+        generation budget and temperature; the number of samples per question may differ (a paired comparison
+        uses the per-question fraction correct). Returns False, and says why, when it does not fit."""
+        st, res, pq = saved.get("settings") or {}, saved.get("results") or {}, saved.get("per_question") or {}
+        why = []
+        if st.get("max_tokens") != self.max_tokens:
+            why.append(f"max_tokens {st.get('max_tokens')} != {self.max_tokens}")
+        if st.get("temperature") != self.temperature:
+            why.append(f"temperature {st.get('temperature')} != {self.temperature}")
+        for cfg, rows in self.sets.items():
+            if cfg not in res or len(pq.get(cfg) or []) != len(rows):
+                why.append(f"{cfg}: {len(pq.get(cfg) or [])} questions saved, {len(rows)} here")
+        if why:
+            print(f"[i] 已有的评测结果不能复用（{'; '.join(why)}）{source}")
+            return False
+        self.results[tag], self.per_question[tag] = {}, {}
+        for cfg in self.sets:
+            r = dict(res[cfg])
+            r["reused_from"] = source
+            if "by_domain" not in r and self.groups.get(cfg):   # an older result: subject split from the per-question data
+                r["by_domain"] = group_means(pq[cfg], self.groups[cfg])
+            self.results[tag][cfg], self.per_question[tag][cfg] = r, list(pq[cfg])
+            print(tag, cfg, "(reused)", r)
+            print_breakdown(tag, cfg, r)
+        return True
 
     def compare(self, tag_a: str, tag_b: str) -> dict:
         """Paired difference tag_b - tag_a per config (percentage points)."""
@@ -428,10 +502,20 @@ class QuickEval:
             a, b = self.per_question.get(tag_a, {}).get(cfg), self.per_question.get(tag_b, {}).get(cfg)
             if a and b:
                 out[cfg] = paired_delta(a, b)
+                groups = self.groups.get(cfg) or []
+                if out[cfg] and len(groups) == len(a):
+                    out[cfg]["by_domain"] = {
+                        g: paired_delta([x for x, n in zip(a, groups) if n == g], [x for x, n in zip(b, groups) if n == g])
+                        for g in sorted(set(groups))}
         self.comparisons[f"{tag_a} -> {tag_b}"] = out
         for cfg, d in out.items():
+            if not d:
+                continue
             verdict = "不显著（|z|<2，看不出差别）" if abs(d.get("z", 0)) < 2 else "显著"
             print(f"{tag_a} -> {tag_b} {cfg}: {d.get('delta'):+.1f} ± {d.get('se')} 分 (z={d.get('z')}, {verdict})")
+            parts = [f"{g} {v['delta']:+.1f} ± {v['se']}" for g, v in (d.get("by_domain") or {}).items() if v]
+            if parts:
+                print("    按学科：" + " | ".join(parts))
         return out
 
     def compare_all(self) -> dict:
@@ -439,6 +523,72 @@ class QuickEval:
         for a, b in zip(tags, tags[1:]):
             self.compare(a, b)
         return self.comparisons
+
+
+def print_breakdown(tag: str, cfg: str, r: dict) -> None:
+    """One readable line per result: where the points are lost (answers without a letter / cut-off answers /
+    wrong reasoning) and the score per subject."""
+    def pct(v):
+        return "没有" if v is None else f"答对 {v}%"
+
+    if r.get("acc_answered") is not None:
+        print(f"    {tag} {cfg} | 给出答案的回答：{pct(r['acc_answered'])}（没给出答案的占 "
+              f"{round(100 - r.get('extract_rate', 100), 1)}%）| 自己收尾的回答：{pct(r.get('acc_stopped'))} | "
+              f"被截断的回答：{pct(r.get('acc_truncated'))}（占 {r.get('truncation_rate')}%）")
+    parts = []
+    for g, d in (r.get("by_domain") or {}).items():
+        extra = f"，无答案 {round(100 - d['extract_rate'], 1)}%，截断 {d['truncation_rate']}%" if "extract_rate" in d else ""
+        parts.append(f"{g} {d['acc_flex']}（{d['n']} 题{extra}）")
+    if parts:
+        print(f"    {tag} {cfg} | 按学科：" + " | ".join(parts))
+
+
+def find_sft_eval(meta: dict | None, root: str) -> tuple[dict | None, str]:
+    """The GPQA eval that the SFT notebook (15) saved for the checkpoint described by `meta` (its handoff.json).
+
+    Notebook 15 keeps its results in <root>/<exp>_<mode>/: stage_sft.json (the training run) and
+    stage_eval_1_sft.json (scores and per-question fractions). Returns (saved eval, path), or (None, reason)
+    when the folder is not there or does not belong to this checkpoint: the step count and final loss in
+    stage_sft.json must equal the ones in handoff.json, and the eval must be newer than the training record.
+    """
+    if not meta or not meta.get("exp") or not meta.get("mode"):
+        return None, "起点检查点没有 handoff.json 记录"
+    folder = Path(root) / f"{meta['exp']}_{meta['mode']}"
+    tag = "1_think" if meta.get("variant") == "think" else "1_sft"
+    sft_file, eval_file = folder / "stage_sft.json", folder / f"stage_eval_{tag}.json"
+    if not eval_file.exists() or not sft_file.exists():
+        return None, f"{folder} 里没有 SFT notebook 的评测结果"
+    try:
+        sft, saved = json.loads(sft_file.read_text()), json.loads(eval_file.read_text())
+    except Exception as e:
+        return None, f"{folder} 里的结果读不出来（{type(e).__name__}）"
+    for key in ("steps", "loss_last"):
+        if meta.get(key) is not None and sft.get(key) != meta.get(key):
+            return None, f"{folder} 是另一次 SFT 训练（{key}: {sft.get(key)} != {meta.get(key)}）"
+    if eval_file.stat().st_mtime < sft_file.stat().st_mtime:
+        return None, f"{eval_file.name} 比 stage_sft.json 旧：不是这次训练之后做的评测"
+    if not saved.get("per_question") or not saved.get("results"):
+        return None, f"{eval_file.name} 里没有逐题结果"
+    return saved, str(eval_file)
+
+
+def reuse_sft_eval(ev: "QuickEval", tag: str, meta: dict | None, root: str, keep_samples: bool = False) -> bool:
+    """Take the SFT notebook's eval of the starting checkpoint as stage `tag` of this run, so the starting model
+    is not evaluated a second time. Later stages are then evaluated with the same number of samples per
+    question as that eval (both sides of the comparison equally noisy) unless keep_samples is set."""
+    saved, where = find_sft_eval(meta, root)
+    if saved is None:
+        print("[i] 没有可复用的起点评测：", where)
+        return False
+    if not ev.adopt(tag, saved, source=where):
+        return False
+    k = (saved.get("settings") or {}).get("samples")
+    if k and not keep_samples and k != ev.samples:
+        print(f"[i] 起点评测是每题 {k} 次采样：后面的评测也改成每题 {k} 次（原来 {ev.samples} 次）。想保持原来的次数就填 EVAL_SAMPLES。")
+        ev.samples = k
+    print(f"[i] 起点模型的 GPQA 分数直接用 notebook 15 测过的结果（{where}），这次不再评测起点。"
+          "那次评测用的是合并前的 base + LoRA，这里加载的是合并后的权重，是同一个模型。")
+    return True
 
 
 # ---------------------------------------------------------------- rewards (GRPO) and answer checking
@@ -1054,10 +1204,12 @@ def log_eval(wandb, results: dict, tag: str) -> None:
         for k, v in r.items():
             if isinstance(v, (int, float)):
                 wandb.run.summary[f"gpqa/{cfg}/{tag}/{k}"] = v
+        for g, d in (r.get("by_domain") or {}).items():
+            wandb.run.summary[f"gpqa/{cfg}/{tag}/acc_flex_{g}"] = d.get("acc_flex")
 
 
-TABLE_COLS = ["stage", "set", "acc_flex", "acc_flex_se", "samples", "acc_strict", "extract_rate", "truncation_rate",
-              "mean_tokens", f"acc_flex_at_{LEADERBOARD_BUDGET}"]
+TABLE_COLS = ["stage", "set", "acc_flex", "acc_flex_se", "samples", "acc_strict", "extract_rate", "acc_answered",
+              "truncation_rate", "mean_tokens", f"acc_flex_at_{LEADERBOARD_BUDGET}"]
 
 
 def print_table(results: dict) -> list[list]:
@@ -1075,7 +1227,7 @@ def print_table(results: dict) -> list[list]:
 # ---------------------------------------------------------------- re-runnable, resumable notebooks (Colab)
 
 
-def reload_scripts(names=("recipe_utils", "science_mix", "select_coverage")) -> list[str]:
+def reload_scripts(names=("recipe_utils", "science_mix", "select_coverage", "grpo_run")) -> list[str]:
     """After `git pull` in a running notebook: re-import the helper modules that are already loaded, so edits
     to scripts/ take effect without restarting the runtime (and without reloading the model)."""
     import importlib

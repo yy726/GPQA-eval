@@ -12,6 +12,7 @@
 | `notebooks/14_decision_probe.ipynb` | **Decision 知识探针**：加打分头直接选选项（不生成文字），测 4B 不写思维链"知道"多少。只做分析，不能提交 |
 | `scripts/science_mix.py` | S1 的科学数据配方（MegaScience 选择题 → GPQA 题面、按学科抽教材题）和留给 GRPO / DPO / 验证的题库（按题目哈希拆分） |
 | `scripts/recipe_utils.py` / `scripts/quick_eval.py` / `scripts/select_coverage.py` | 11–15 共用：聊天模板与结束符、题面、答案提取与诊断指标、多次采样的快速评测与配对比较（`QuickEval`）、GRPO 奖励（选择题 / 数值题 / 软超长惩罚）、Dr.SCI 与 Dolci DPO 转换、去污染、多数据源抽样、4-gram 覆盖度选样 |
+| `scripts/grpo_run.py` | notebook 11 第 4 节的全部逻辑（题目池、留出验证集、预筛、奖励函数、分段训练、检查点和续训、阶段验收、起点评测的复用）。notebook 里只留开关：第 3 格每次 `git pull`，旧的 notebook 副本也会跑最新的逻辑 |
 | `experiments/DATASETS.md` | 可能对 GPQA 有用的数据集（MegaScience、Dr.SCI、OpenThoughts3…）和用法 |
 | `notebooks/10_iterate_0p6b.ipynb` | 一键实验（只 SFT）：Dolci 数据 → 去污染 → QLoRA SFT → 合并 → **锁定配置**评测 → 诊断 JSON |
 | `notebooks/02_sft_dolci_lora.ipynb` | 单独的 SFT notebook（推到 Hub，适合配合 `01` 分开跑） |
