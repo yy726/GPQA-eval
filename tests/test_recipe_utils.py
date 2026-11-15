@@ -582,3 +582,18 @@ def test_latest_grpo_checkpoint_adds_up_resumed_runs(tmp_path):
             (d / "adapter_model.safetensors").write_bytes(b"x")
     path, step = ru.latest_grpo_checkpoint(str(tmp_path))
     assert step == 30 and path.endswith("from_20/checkpoint-10")  # the half-written checkpoint-20 is ignored
+
+
+def test_reward_totals_keep_correctness_dominant_and_truncation_last():
+    # Totals as notebook 11 adds them up (correctness + format + overlong); the cap is the length budget.
+    cap, cache, w = 4096, 1024, 0.5
+
+    def total(text, answer, n_tokens):
+        cut = n_tokens >= cap
+        return (ru.correctness_score(text, answer, truncated=cut) + ru.format_score(text, "mcq", w, truncated=cut)
+                + ru.soft_overlong_penalty(n_tokens, cap, cache))
+
+    right, wrong, none = "The answer is (D).", "The answer is (A).", "I am not sure."
+    assert total(right, "D", 500) == total(right, "D", cap - cache) == 2.5  # no length pressure inside the budget
+    assert total(right, "D", cap - 1) > total(wrong, "D", 100)  # a correct answer beats any wrong one, however long
+    assert total(wrong, "D", 100) > total(none, "D", 100) > total(right, "D", cap) == -2.0
