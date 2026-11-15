@@ -628,3 +628,41 @@ def test_stop_checks_are_relative_to_the_starting_model():
     assert ru.stage_accept({"stop_rate": 82.0}, baseline_stop_rate=88.0)[0] is False
     assert ru.clip_stop_threshold(0.15, None) == 0.15 and ru.clip_stop_threshold(0.15, 99.9) == 0.15
     assert ru.clip_stop_threshold(0.15, 88.0) == 0.22
+
+
+def test_guarded_generate_drops_leftovers_of_an_interrupted_call():
+    class Engine:  # mimics vLLM: an interrupted generate leaves its requests behind, the next call returns them first
+        def __init__(self):
+            self.pending, self.can_abort = [], True
+            self.output_processor = self
+            self.request_states, self.parent_requests = {}, {}
+
+        def abort_request(self, ids, internal=False):
+            if not self.can_abort:
+                raise RuntimeError("different vLLM internals")
+            self.pending, self.request_states = [], {}
+
+    class Model:
+        def __init__(self):
+            self.vllm_engine = type("LLM", (), {})()
+            self.vllm_engine.llm_engine = self.engine = Engine()
+
+        def fast_generate(self, prompts, interrupt=False, **kwargs):
+            self.engine.request_states = {p: 1 for p in prompts}
+            if interrupt:
+                self.engine.pending = ["stale:" + p for p in prompts]
+                raise KeyboardInterrupt
+            out, self.engine.pending, self.engine.request_states = self.engine.pending + ["out:" + p for p in prompts], [], {}
+            return out
+
+    m = Model()
+    assert ru.guard_fast_generate(m) is True and ru.guard_fast_generate(m) is False
+    with pytest.raises(KeyboardInterrupt):
+        m.fast_generate(["a", "b", "c"], interrupt=True)
+    assert m.engine.pending == []  # aborted when the call was interrupted
+    assert m.fast_generate(["x", "y"]) == ["out:x", "out:y"]
+    # engine internals that cannot be aborted: the leftovers finish, and are dropped from the result
+    m.engine.can_abort = False
+    with pytest.raises(KeyboardInterrupt):
+        m.fast_generate(["a", "b", "c"], interrupt=True)
+    assert m.fast_generate(["x", "y"]) == ["out:x", "out:y"]

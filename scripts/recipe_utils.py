@@ -841,6 +841,64 @@ def init_model_problem(meta: dict | None) -> str | None:
     return None
 
 
+def abort_unfinished_requests(model) -> int:
+    """Abort whatever the vLLM engine behind model.fast_generate still has queued or running; returns how many.
+
+    vLLM's offline generate() does not abort its requests when it is interrupted (Ctrl-C / the Colab stop
+    button): they stay in the engine, and the next generate() call finishes them first and returns their
+    outputs in front of its own (outputs are sorted by request id). The caller then pairs answers with the
+    wrong prompts. Best effort: the engine internals differ between vLLM versions, so failures are reported,
+    not raised - guard_fast_generate also trims leftover outputs.
+    """
+    try:
+        engine = model.vllm_engine.llm_engine
+        proc = engine.output_processor
+        n = len(proc.request_states)  # one entry per unfinished sample (a prompt with n=8 has up to 8)
+        if not n:
+            return 0
+        external = getattr(proc, "external_req_ids", None)
+        if external:  # the ids generate() handed out; aborts every sample of each prompt
+            engine.abort_request(list(external), internal=False)
+        else:
+            engine.abort_request(list(proc.request_states), internal=True)
+        getattr(proc, "parent_requests", {}).clear()  # parents of aborted n>1 requests are not removed by vLLM
+        return n
+    except Exception as e:
+        print(f"[!] could not abort leftover vLLM requests ({type(e).__name__}: {e})")
+        return 0
+
+
+def guard_fast_generate(model) -> bool:
+    """Wrap model.fast_generate so an interrupted call cannot corrupt the next one (see
+    abort_unfinished_requests): leftovers are aborted before every call and when a call is interrupted, and
+    if some finish anyway, only the outputs of this call's own prompts (the last ones) are returned.
+    Idempotent; returns True when the wrapper was installed by this call."""
+    inner = getattr(model, "fast_generate", None)
+    if inner is None or getattr(inner, "_stale_guard", False):
+        return False
+
+    def fast_generate(*args, **kwargs):
+        prompts = args[0] if args else kwargs.get("prompts")
+        n_stale = abort_unfinished_requests(model)
+        if n_stale:
+            print(f"[i] aborted {n_stale} leftover vLLM requests from an interrupted generation")
+        try:
+            outs = inner(*args, **kwargs)
+        except BaseException:
+            abort_unfinished_requests(model)
+            raise
+        n = 1 if isinstance(prompts, str) else (len(prompts) if hasattr(prompts, "__len__") else None)
+        if n is not None and isinstance(outs, list) and len(outs) > n:
+            print(f"[!] generate returned {len(outs)} outputs for {n} prompts: dropping {len(outs) - n} leftover "
+                  "outputs of an interrupted call")
+            outs = outs[-n:]
+        return outs
+
+    fast_generate._stale_guard = True
+    model.fast_generate = fast_generate
+    return True
+
+
 def list_grpo_checkpoints(ckpt_dir: str) -> list[tuple[str, int]]:
     """Adapter checkpoints of a GRPO stage as (path, stage step), newest first.
 
